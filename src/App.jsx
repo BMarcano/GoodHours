@@ -1,13 +1,14 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Sun, MapPin, Clock, Heart, Users, Bookmark, Globe, MessageCircle, Sparkles, ChevronRight, Plus, X, Calendar, ThumbsUp, Baby, ShieldCheck, Star, Camera } from "lucide-react";
+import { supabase } from "./supabaseClient";
 
 // ------------------------------------------------------------------
 // THE GOOD HOURS — MVP
 // Screens: Plan Builder → Generated Plan → My Plans → Community
 // Backend notes for Supabase dev are at the bottom of this file.
-// NOTE: plan generation now runs server-side via /api/generate-plan
-// (Anthropic key protected). Auth + paywall are still the mock versions;
-// Supabase Auth (magic link) + Stripe land in the next update.
+// NOTE: plan generation runs server-side via /api/generate-plan
+// (Anthropic key protected). Auth is real Supabase magic link;
+// plan persistence + subscriptions (Stripe) land in the next updates.
 // ------------------------------------------------------------------
 
 const FONT_LINK = (
@@ -208,11 +209,57 @@ export default function TheGoodHours() {
   const [meetupRated, setMeetupRated] = useState(false);
   const [ratingTags, setRatingTags] = useState([]);
   // --- Auth + membership state ---
-  const [authStep, setAuthStep] = useState("login"); // login | paywall | app
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true); // gate while restoring the session
+  const [authStep, setAuthStep] = useState("paywall"); // paywall | app (login renders whenever there's no session)
+  const [linkState, setLinkState] = useState("idle"); // idle | sending | sent
+  const [authError, setAuthError] = useState("");
   const [previewMode, setPreviewMode] = useState(false); // free taste: 1 plan, no card
   const [previewUsed, setPreviewUsed] = useState(false);
   const [email, setEmail] = useState("");
   const [billing, setBilling] = useState("year"); // month | year
+
+  // Session bootstrap: restore on load, then follow sign-in/sign-out events
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthLoading(false);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+      if (!newSession) {
+        // signed out — wipe per-user state; login screen renders while session is null
+        setAuthStep("paywall");
+        setPreviewMode(false);
+        setPreviewUsed(false);
+        setPlan(null);
+        setSavedPlans([]);
+        setTab("build");
+        setLinkState("idle");
+        setAuthError("");
+      }
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  async function handleSendLink() {
+    setLinkState("sending");
+    setAuthError("");
+    const { error: otpError } = await supabase.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: window.location.origin },
+    });
+    if (otpError) {
+      setAuthError("Couldn't send the link — try again in a moment.");
+      setLinkState("idle");
+    } else {
+      setLinkState("sent");
+    }
+  }
+
+  function handleSignOut() {
+    supabase.auth.signOut(); // the auth listener above resets state back to the login screen
+  }
 
   // Gate: verified users only for public actions (comment, share, join meetup)
   function requireVerified(actionFn) {
@@ -292,8 +339,18 @@ export default function TheGoodHours() {
     );
   }
 
+  // ---------------- AUTH SPLASH ----------------
+  if (authLoading) {
+    return (
+      <div className="mnn-root min-h-screen w-full flex items-center justify-center" style={{ background: C.cream }}>
+        {FONT_LINK}
+        <MnnLogo size={96} />
+      </div>
+    );
+  }
+
   // ---------------- LOGIN SCREEN ----------------
-  if (authStep === "login") {
+  if (!session) {
     return (
       <div className="mnn-root min-h-screen w-full flex justify-center" style={{ background: C.cream }}>
         {FONT_LINK}
@@ -318,8 +375,8 @@ export default function TheGoodHours() {
               style={{ borderColor: "#F3EBDA", color: C.ink, background: C.card }}
             />
             <button
-              disabled={!email.includes("@")}
-              onClick={() => setAuthStep("paywall")}
+              disabled={!email.includes("@") || linkState !== "idle"}
+              onClick={handleSendLink}
               className="mt-3 w-full rounded-2xl py-4 font-extrabold text-base transition-all active:scale-[.98]"
               style={{
                 background: email.includes("@") ? C.terra : "#EAE6F2",
@@ -327,10 +384,14 @@ export default function TheGoodHours() {
                 boxShadow: email.includes("@") ? "0 6px 20px rgba(255,93,143,.4)" : "none",
               }}
             >
-              Continue →
+              {linkState === "sending" ? "Sending..." : linkState === "sent" ? "Link sent ✓" : "Continue →"}
             </button>
-            <p className="text-[11px] font-bold text-center mt-3" style={{ color: C.inkSoft }}>
-              We'll email you a magic link — no password to remember. 🪄
+            <p className="text-[11px] font-bold text-center mt-3" style={{ color: authError ? C.terra : C.inkSoft }}>
+              {authError
+                ? authError
+                : linkState === "sent"
+                ? "Check your email and tap the magic link to hop in ✉️"
+                : "We'll email you a magic link — no password to remember. 🪄"}
             </p>
           </div>
         </div>
@@ -415,6 +476,9 @@ export default function TheGoodHours() {
           <p className="text-[10px] font-bold text-center mt-3" style={{ color: C.inkSoft }}>
             Secure checkout via Stripe · cancel in two taps, no email required
           </p>
+          <button onClick={handleSignOut} className="mt-4 w-full py-2 text-xs font-extrabold text-center" style={{ color: C.inkSoft }}>
+            sign out
+          </button>
         </div>
       </div>
     );
@@ -428,7 +492,7 @@ export default function TheGoodHours() {
         <header className="px-6 pt-8 pb-4">
           <div className="flex items-center gap-3">
             <MnnLogo />
-            <div>
+            <div className="flex-1">
               <h1 className="mnn-display text-3xl font-bold leading-none tracking-tight" style={{ color: C.ink }}>
                 the
                 <span
@@ -443,6 +507,9 @@ export default function TheGoodHours() {
                 make the little hours the good ones ✨
               </p>
             </div>
+            <button onClick={handleSignOut} className="self-start text-[11px] font-extrabold" style={{ color: C.inkSoft }}>
+              sign out
+            </button>
           </div>
         </header>
 
