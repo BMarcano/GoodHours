@@ -157,6 +157,22 @@ async function generatePlan({ ages, slots, location, planDate }) {
   return await res.json();
 }
 
+// ---------- DB plan row (snake_case) → UI plan shape (camelCase) ----------
+function dbPlanToUi(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    summary: row.summary,
+    location: row.location,
+    planDate: row.plan_date,
+    ages: row.ages ?? [],
+    blocks: row.blocks ?? [],
+    proTip: row.pro_tip,
+    isPublic: row.is_public,
+    savedAt: new Date(row.created_at).toLocaleDateString(),
+  };
+}
+
 // ---------- Small components ----------
 function Pill({ children, tone = "sage" }) {
   const tones = {
@@ -218,6 +234,11 @@ export default function TheGoodHours() {
   const [previewUsed, setPreviewUsed] = useState(false);
   const [email, setEmail] = useState("");
   const [billing, setBilling] = useState("year"); // month | year
+  const [isMember, setIsMember] = useState(false); // subscriptions.status === 'active'
+  const [freePlansUsed, setFreePlansUsed] = useState(0);
+  const [dataLoading, setDataLoading] = useState(true); // per-user data load after login
+  const [saving, setSaving] = useState(false);
+  const [membershipNote, setMembershipNote] = useState(false); // paywall CTA note until Stripe lands
 
   // Session bootstrap: restore on load, then follow sign-in/sign-out events
   useEffect(() => {
@@ -237,10 +258,41 @@ export default function TheGoodHours() {
         setTab("build");
         setLinkState("idle");
         setAuthError("");
+        setIsMember(false);
+        setFreePlansUsed(0);
+        setDataLoading(true);
+        setMembershipNote(false);
       }
     });
     return () => subscription.unsubscribe();
   }, []);
+
+  // Per-user data: profile (free-preview counter), subscription status, saved plans
+  useEffect(() => {
+    const userId = session?.user?.id;
+    if (!userId) return;
+    let cancelled = false;
+    setDataLoading(true);
+    (async () => {
+      const [profileRes, subRes, plansRes] = await Promise.all([
+        supabase.from("profiles").select("free_plans_used").eq("id", userId).maybeSingle(),
+        supabase.from("subscriptions").select("status").eq("profile_id", userId).maybeSingle(),
+        supabase.from("plans").select("*").eq("profile_id", userId).order("created_at", { ascending: false }),
+      ]);
+      if (cancelled) return;
+      const used = profileRes.data?.free_plans_used ?? 0;
+      const member = subRes.data?.status === "active";
+      setFreePlansUsed(used);
+      setPreviewUsed(used >= 1);
+      setIsMember(member);
+      setSavedPlans((plansRes.data ?? []).map(dbPlanToUi));
+      // members land straight in the app; everyone else meets the paywall
+      setPreviewMode(false);
+      setAuthStep(member ? "app" : "paywall");
+      setDataLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [session?.user?.id]);
 
   async function handleSendLink() {
     setLinkState("sending");
@@ -285,18 +337,45 @@ export default function TheGoodHours() {
       const p = await generatePlan({ ages, slots, location, planDate });
       setPlan({ ...p, id: Date.now(), location, ages: [...ages], planDate, isPublic: false, savedAt: null });
       setTab("plan");
-      if (previewMode) setPreviewUsed(true);
+      if (previewMode) {
+        setPreviewUsed(true);
+        const next = freePlansUsed + 1;
+        setFreePlansUsed(next);
+        // fire-and-forget; enforcement moves server-side with the Stripe milestone
+        supabase.from("profiles").update({ free_plans_used: next }).eq("id", session.user.id).then(() => {});
+      }
     } catch (e) {
       setError("Couldn't generate a plan — try again in a moment.");
     }
     setLoading(false);
   }
 
-  function savePlan(makePublic) {
+  async function savePlan(makePublic) {
     if (previewMode) { setAuthStep("paywall"); return; } // saving is a member feature
-    if (!plan) return;
-    const saved = { ...plan, isPublic: makePublic, savedAt: new Date().toLocaleDateString() };
-    setSavedPlans((prev) => [saved, ...prev.filter((p) => p.id !== plan.id)]);
+    if (!plan || !session?.user?.id || saving) return;
+    setSaving(true);
+    setError("");
+    const payload = {
+      profile_id: session.user.id,
+      title: plan.title,
+      summary: plan.summary,
+      location: plan.location,
+      plan_date: plan.planDate,
+      ages: plan.ages,
+      blocks: plan.blocks,
+      pro_tip: plan.proTip,
+      is_public: makePublic,
+    };
+    // freshly generated plans carry a Date.now() numeric id — omit it so Postgres mints the uuid
+    if (typeof plan.id === "string" && plan.id.length === 36) payload.id = plan.id;
+    const { data, error: saveError } = await supabase.from("plans").upsert(payload).select().single();
+    setSaving(false);
+    if (saveError || !data) {
+      setError("Couldn't save your plan — try again in a moment.");
+      return;
+    }
+    const saved = dbPlanToUi(data);
+    setSavedPlans((prev) => [saved, ...prev.filter((p) => p.id !== saved.id && p.id !== plan.id)]);
     setPlan(saved);
     if (makePublic) {
       setCommunity((prev) => [
@@ -399,6 +478,16 @@ export default function TheGoodHours() {
     );
   }
 
+  // ---------------- DATA SPLASH (loading the user's profile/plans) ----------------
+  if (dataLoading) {
+    return (
+      <div className="mnn-root min-h-screen w-full flex items-center justify-center" style={{ background: C.cream }}>
+        {FONT_LINK}
+        <MnnLogo size={96} />
+      </div>
+    );
+  }
+
   // ---------------- PAYWALL SCREEN ----------------
   if (authStep === "paywall") {
     return (
@@ -454,12 +543,17 @@ export default function TheGoodHours() {
           </div>
 
           <button
-            onClick={() => { setPreviewMode(false); setAuthStep("app"); }}
+            onClick={() => setMembershipNote(true)}
             className="mt-6 w-full rounded-2xl py-4 font-extrabold text-base transition-all active:scale-[.98] fade-up fade-up-4"
             style={{ background: C.terra, color: "#fff", boxShadow: "0 6px 20px rgba(255,93,143,.4)" }}
           >
             Start my membership · {billing === "year" ? "$70/yr" : "$7/mo"}
           </button>
+          {membershipNote && (
+            <p className="mt-2 text-center text-xs font-extrabold fade-up" style={{ color: C.inkSoft }}>
+              Payments go live at launch, try the free preview below in the meantime 💛
+            </p>
+          )}
           {!previewUsed ? (
             <button
               onClick={() => { setPreviewMode(true); setAuthStep("app"); setTab("build"); }}
@@ -730,6 +824,12 @@ export default function TheGoodHours() {
                     <div className="fade-up rounded-3xl p-4 flex gap-3 items-start" style={{ background: C.goldSoft }}>
                       <Sparkles size={17} style={{ color: "#C77800" }} className="mt-0.5 shrink-0" />
                       <p className="text-sm font-bold leading-relaxed" style={{ color: "#9A5B00" }}>{plan.proTip}</p>
+                    </div>
+                  )}
+
+                  {error && (
+                    <div className="rounded-2xl px-4 py-3 text-sm font-bold" style={{ background: C.terraSoft, color: C.terra }}>
+                      {error}
                     </div>
                   )}
 
