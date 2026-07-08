@@ -21,7 +21,7 @@ async function getUserFromRequest(req) {
 // Newest search tool first; fall back fast (400) to the widely-available one.
 const SEARCH_TOOL_VERSIONS = ["web_search_20260209", "web_search_20250305"];
 
-async function runEventsSearch(prompt, toolType) {
+async function runEventsSearch(prompt, toolType, maxUses) {
   let messages = [{ role: "user", content: prompt }];
   let data = null;
   // a server-side tool run can pause once (stop_reason "pause_turn");
@@ -38,7 +38,7 @@ async function runEventsSearch(prompt, toolType) {
         model: "claude-sonnet-4-6",
         max_tokens: 1500,
         messages,
-        tools: [{ type: toolType, name: "web_search", max_uses: 2 }],
+        tools: [{ type: toolType, name: "web_search", max_uses: maxUses }],
       }),
     });
     if (!r.ok) {
@@ -52,7 +52,8 @@ async function runEventsSearch(prompt, toolType) {
 }
 
 function buildPrompt({ kind, location, dayLabel, ages }) {
-  const intro = `You help caregivers find REAL kid-friendly happenings. Search the web for events happening on ${dayLabel} relevant to a caregiver in ${location} with kids aged ${ages.join(", ")}. Use at most 2 web searches, then answer.`;
+  const searchBudget = kind === "trip" ? "Use ONE web search" : "Use at most 2 web searches";
+  const intro = `You help caregivers find REAL kid-friendly happenings. Search the web for events happening on ${dayLabel} relevant to a caregiver in ${location} with kids aged ${ages.join(", ")}. ${searchBudget}, then answer.`;
 
   if (kind === "trip") {
     return `${intro}
@@ -72,6 +73,7 @@ Respond ONLY with JSON, no markdown fences, no other text:
 }
 
 export default async function handler(req, res) {
+  res.setHeader("x-ghv", "4"); // deploy marker
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
     return;
@@ -100,11 +102,12 @@ export default async function handler(req, res) {
     });
 
     const prompt = buildPrompt({ kind, location, dayLabel, ages: cleanAges });
+    const maxUses = kind === "trip" ? 1 : 2;
 
-    let result = await runEventsSearch(prompt, SEARCH_TOOL_VERSIONS[0]);
+    let result = await runEventsSearch(prompt, SEARCH_TOOL_VERSIONS[0], maxUses);
     if (!result.ok && result.status === 400) {
       console.error("search tool rejected, falling back:", result.errText?.slice(0, 300));
-      result = await runEventsSearch(prompt, SEARCH_TOOL_VERSIONS[1]);
+      result = await runEventsSearch(prompt, SEARCH_TOOL_VERSIONS[1], maxUses);
     }
     if (!result.ok) {
       console.error("Anthropic API error:", result.status, result.errText?.slice(0, 500));
