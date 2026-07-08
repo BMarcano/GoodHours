@@ -3,9 +3,22 @@
 // environment variable (Vercel > Settings > Environment Variables) and never
 // reaches the browser.
 //
-// TODO before public launch (lands with the Stripe milestone):
-//  - Verify the caller's Supabase session token (Authorization: Bearer ...)
-//  - Enforce the free-preview limit (1 plan) and subscriber status server-side
+// Auth + gating (T6): the caller's Supabase JWT is verified server-side, then
+// can_generate_plan() (service role RPC) allows subscribers, or atomically
+// consumes the single free preview, or returns 402.
+
+async function getUserFromRequest(req) {
+  const supaUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  const anonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token || !supaUrl || !anonKey) return null;
+  const r = await fetch(`${supaUrl}/auth/v1/user`, {
+    headers: { apikey: anonKey, Authorization: `Bearer ${token}` },
+  });
+  if (!r.ok) return null;
+  return await r.json();
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -21,6 +34,38 @@ export default async function handler(req, res) {
     if (!cleanAges.length || !cleanSlots.length || !location.trim() || !planDate) {
       res.status(400).json({ error: "Missing inputs" });
       return;
+    }
+
+    // --- Membership / free-preview gate (server-side source of truth) ---
+    const user = await getUserFromRequest(req);
+    if (!user?.id) {
+      res.status(401).json({ error: "Not signed in" });
+      return;
+    }
+    const supaUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (supaUrl && serviceKey) {
+      const gate = await fetch(`${supaUrl}/rest/v1/rpc/can_generate_plan`, {
+        method: "POST",
+        headers: {
+          apikey: serviceKey,
+          Authorization: `Bearer ${serviceKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ p_profile: user.id }),
+      });
+      if (gate.ok) {
+        const allowed = await gate.json();
+        if (allowed === false) {
+          res.status(402).json({ error: "Membership required" });
+          return;
+        }
+      } else {
+        // fail-open on infra errors so a Supabase hiccup never blocks members
+        console.error("can_generate_plan RPC failed:", gate.status, await gate.text());
+      }
+    } else {
+      console.warn("SUPABASE_SERVICE_ROLE_KEY not set — skipping server-side plan gating");
     }
 
     // Day-of-week context: the model has no clock, we must tell it the date

@@ -147,13 +147,31 @@ const SEED_FEATURED = [
 ];
 
 // ---------- Plan generation (server-side, key protected) ----------
-async function generatePlan({ ages, slots, location, planDate }) {
+async function generatePlan({ ages, slots, location, planDate }, accessToken) {
   const res = await fetch("/api/generate-plan", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
     body: JSON.stringify({ ages, slots, location, planDate }),
   });
+  if (res.status === 402) throw new Error("membership_required");
   if (!res.ok) throw new Error("Plan generation failed");
+  return await res.json();
+}
+
+// ---------- Live events (server-side web search; fires after the plan) ----------
+async function fetchTodaysEvents({ location, planDate, ages }, accessToken) {
+  const res = await fetch("/api/fetch-events", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
+    body: JSON.stringify({ location, planDate, ages }),
+  });
+  if (!res.ok) throw new Error("Events search failed");
   return await res.json();
 }
 
@@ -238,7 +256,11 @@ export default function TheGoodHours() {
   const [freePlansUsed, setFreePlansUsed] = useState(0);
   const [dataLoading, setDataLoading] = useState(true); // per-user data load after login
   const [saving, setSaving] = useState(false);
-  const [membershipNote, setMembershipNote] = useState(false); // paywall CTA note until Stripe lands
+  const [checkoutState, setCheckoutState] = useState("idle"); // idle | loading | error
+  // --- Live events (load after the plan so they never block it) ---
+  const [events, setEvents] = useState(null);
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const [eventsPlanId, setEventsPlanId] = useState(null); // events belong to the plan that generated them
 
   // Session bootstrap: restore on load, then follow sign-in/sign-out events
   useEffect(() => {
@@ -261,7 +283,10 @@ export default function TheGoodHours() {
         setIsMember(false);
         setFreePlansUsed(0);
         setDataLoading(true);
-        setMembershipNote(false);
+        setCheckoutState("idle");
+        setEvents(null);
+        setEventsLoading(false);
+        setEventsPlanId(null);
       }
     });
     return () => subscription.unsubscribe();
@@ -274,14 +299,27 @@ export default function TheGoodHours() {
     let cancelled = false;
     setDataLoading(true);
     (async () => {
+      const fetchSub = () => supabase.from("subscriptions").select("status").eq("profile_id", userId).maybeSingle();
       const [profileRes, subRes, plansRes] = await Promise.all([
         supabase.from("profiles").select("free_plans_used").eq("id", userId).maybeSingle(),
-        supabase.from("subscriptions").select("status").eq("profile_id", userId).maybeSingle(),
+        fetchSub(),
         supabase.from("plans").select("*").eq("profile_id", userId).order("created_at", { ascending: false }),
       ]);
       if (cancelled) return;
       const used = profileRes.data?.free_plans_used ?? 0;
-      const member = subRes.data?.status === "active";
+      let member = subRes.data?.status === "active";
+      // Back from Stripe checkout: the webhook can lag the redirect by a few seconds
+      if (!member && window.location.search.includes("checkout=success")) {
+        for (let i = 0; i < 8 && !member && !cancelled; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          const retry = await fetchSub();
+          member = retry.data?.status === "active";
+        }
+      }
+      if (window.location.search.includes("checkout=")) {
+        window.history.replaceState(null, "", window.location.pathname);
+      }
+      if (cancelled) return;
       setFreePlansUsed(used);
       setPreviewUsed(used >= 1);
       setIsMember(member);
@@ -334,20 +372,53 @@ export default function TheGoodHours() {
     setLoading(true);
     setError("");
     try {
-      const p = await generatePlan({ ages, slots, location, planDate });
-      setPlan({ ...p, id: Date.now(), location, ages: [...ages], planDate, isPublic: false, savedAt: null });
+      const token = session?.access_token;
+      const p = await generatePlan({ ages, slots, location, planDate }, token);
+      const genId = Date.now();
+      setPlan({ ...p, id: genId, location, ages: [...ages], planDate, isPublic: false, savedAt: null });
       setTab("plan");
       if (previewMode) {
+        // the server increments profiles.free_plans_used atomically
         setPreviewUsed(true);
-        const next = freePlansUsed + 1;
-        setFreePlansUsed(next);
-        // fire-and-forget; enforcement moves server-side with the Stripe milestone
-        supabase.from("profiles").update({ free_plans_used: next }).eq("id", session.user.id).then(() => {});
+        setFreePlansUsed(freePlansUsed + 1);
       }
+      // Live events stream in AFTER the plan is on screen (~30s web search) —
+      // a bonus, never a blocker
+      setEvents(null);
+      setEventsPlanId(genId);
+      setEventsLoading(true);
+      fetchTodaysEvents({ location, planDate, ages }, token)
+        .then((ev) => setEvents(ev))
+        .catch(() => setEvents({ local: [], worthTheTrip: [] }))
+        .finally(() => setEventsLoading(false));
     } catch (e) {
-      setError("Couldn't generate a plan — try again in a moment.");
+      if (e.message === "membership_required") {
+        setPreviewUsed(true);
+        setAuthStep("paywall");
+      } else {
+        setError("Couldn't generate a plan — try again in a moment.");
+      }
     }
     setLoading(false);
+  }
+
+  async function handleStartMembership() {
+    setCheckoutState("loading");
+    try {
+      const res = await fetch("/api/create-checkout-session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ billing }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.url) throw new Error("checkout failed");
+      window.location.href = data.url; // Stripe Checkout; the webhook flips membership
+    } catch (e) {
+      setCheckoutState("error");
+    }
   }
 
   async function savePlan(makePublic) {
@@ -376,6 +447,7 @@ export default function TheGoodHours() {
     }
     const saved = dbPlanToUi(data);
     setSavedPlans((prev) => [saved, ...prev.filter((p) => p.id !== saved.id && p.id !== plan.id)]);
+    if (eventsPlanId === plan.id) setEventsPlanId(saved.id); // keep events attached across the id change
     setPlan(saved);
     if (makePublic) {
       setCommunity((prev) => [
@@ -543,15 +615,18 @@ export default function TheGoodHours() {
           </div>
 
           <button
-            onClick={() => setMembershipNote(true)}
+            onClick={handleStartMembership}
+            disabled={checkoutState === "loading"}
             className="mt-6 w-full rounded-2xl py-4 font-extrabold text-base transition-all active:scale-[.98] fade-up fade-up-4"
             style={{ background: C.terra, color: "#fff", boxShadow: "0 6px 20px rgba(255,93,143,.4)" }}
           >
-            Start my membership · {billing === "year" ? "$70/yr" : "$7/mo"}
+            {checkoutState === "loading"
+              ? "Starting checkout..."
+              : `Start my membership · ${billing === "year" ? "$70/yr" : "$7/mo"}`}
           </button>
-          {membershipNote && (
-            <p className="mt-2 text-center text-xs font-extrabold fade-up" style={{ color: C.inkSoft }}>
-              Payments go live at launch, try the free preview below in the meantime 💛
+          {checkoutState === "error" && (
+            <p className="mt-2 text-center text-xs font-extrabold fade-up" style={{ color: C.terra }}>
+              Couldn't start checkout — try again in a moment.
             </p>
           )}
           {!previewUsed ? (
@@ -824,6 +899,57 @@ export default function TheGoodHours() {
                     <div className="fade-up rounded-3xl p-4 flex gap-3 items-start" style={{ background: C.goldSoft }}>
                       <Sparkles size={17} style={{ color: "#C77800" }} className="mt-0.5 shrink-0" />
                       <p className="text-sm font-bold leading-relaxed" style={{ color: "#9A5B00" }}>{plan.proTip}</p>
+                    </div>
+                  )}
+
+                  {/* ---- Live events: happening today + worth the trip ---- */}
+                  {eventsPlanId === plan.id && eventsLoading && (
+                    <div className="fade-up rounded-2xl px-4 py-3 flex items-center gap-2" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
+                      <span className="w-2 h-2 rounded-full animate-ping" style={{ background: C.terra }} />
+                      <p className="text-xs font-bold" style={{ color: C.inkSoft }}>
+                        Checking what's actually on in {plan.location} today — live search, ~30 seconds…
+                      </p>
+                    </div>
+                  )}
+
+                  {eventsPlanId === plan.id && events && events.local?.length > 0 && (
+                    <div className="fade-up">
+                      <p className="text-xs font-extrabold px-1 mb-2 flex items-center gap-1.5" style={{ color: C.ink }}>
+                        <Calendar size={13} style={{ color: C.terra }} /> Happening today near you
+                      </p>
+                      <div className="space-y-2">
+                        {events.local.map((ev, i) => (
+                          <div key={i} className="rounded-2xl p-4" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)", borderLeft: `4px solid ${C.terra}` }}>
+                            <div className="flex items-start justify-between gap-2">
+                              <h4 className="font-extrabold text-sm flex-1 min-w-0" style={{ color: C.ink }}>{ev.name}</h4>
+                              <span className="max-w-[38%] text-right"><Pill tone={String(ev.cost).toLowerCase() === "free" ? "sage" : "gold"}>{ev.cost}</Pill></span>
+                            </div>
+                            <p className="text-xs font-bold mt-0.5" style={{ color: C.terra }}>{ev.time} · {ev.venue}</p>
+                            <p className="text-xs font-semibold mt-1.5 leading-relaxed" style={{ color: C.inkSoft }}>💡 {ev.note}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {eventsPlanId === plan.id && events && events.worthTheTrip?.length > 0 && (
+                    <div className="fade-up">
+                      <p className="text-xs font-extrabold px-1 mb-2 flex items-center gap-1.5" style={{ color: C.ink }}>
+                        🚇 Worth the trip?
+                      </p>
+                      <div className="space-y-2">
+                        {events.worthTheTrip.map((ev, i) => (
+                          <div key={i} className="rounded-2xl p-4" style={{ background: C.ink }}>
+                            <div className="flex items-start justify-between gap-2">
+                              <h4 className="font-extrabold text-sm flex-1 min-w-0" style={{ color: C.cream }}>{ev.name}</h4>
+                              <span className="text-xs font-extrabold px-2 py-1 rounded-full max-w-[38%] text-center" style={{ background: C.gold, color: C.ink }}>{ev.cost}</span>
+                            </div>
+                            <p className="text-xs font-bold mt-0.5" style={{ color: C.gold }}>{ev.time} · {ev.venue}</p>
+                            <p className="text-xs font-semibold mt-1.5 leading-relaxed" style={{ color: "#B8B3D1" }}>{ev.whyWorth}</p>
+                            <p className="text-[11px] font-bold mt-1.5" style={{ color: C.sage }}>🚇 {ev.transitNote}</p>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
 
