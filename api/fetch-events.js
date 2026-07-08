@@ -17,6 +17,40 @@ async function getUserFromRequest(req) {
   return await r.json();
 }
 
+// Newest search tool first; fall back to the widely-available version if the
+// account/model rejects it with a 400.
+const SEARCH_TOOL_VERSIONS = ["web_search_20260209", "web_search_20250305"];
+
+async function runEventsSearch(prompt, toolType) {
+  let messages = [{ role: "user", content: prompt }];
+  let data = null;
+  // server-side tool runs can pause mid-loop (stop_reason "pause_turn");
+  // resend the conversation to let the search finish, up to 3 rounds
+  for (let round = 0; round < 3; round++) {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 2500,
+        messages,
+        tools: [{ type: toolType, name: "web_search", max_uses: 3 }],
+      }),
+    });
+    if (!r.ok) {
+      return { ok: false, status: r.status, errText: await r.text() };
+    }
+    data = await r.json();
+    if (data.stop_reason !== "pause_turn") break;
+    messages = [...messages, { role: "assistant", content: data.content }];
+  }
+  return { ok: true, data };
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
@@ -59,36 +93,25 @@ Respond ONLY with JSON, no markdown fences, no other text:
   "worthTheTrip": [ { "name": "", "time": "", "venue": "", "whyWorth": "one line on why it justifies the ride", "transitNote": "e.g. ~25 min on the 2/3 from Park Slope", "cost": "$30" } ]
 }`;
 
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1500,
-        messages: [{ role: "user", content: prompt }],
-        tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 3 }],
-      }),
-    });
-
-    if (!r.ok) {
-      const errBody = await r.text();
-      console.error("Anthropic API error:", r.status, errBody);
+    let result = await runEventsSearch(prompt, SEARCH_TOOL_VERSIONS[0]);
+    if (!result.ok && result.status === 400) {
+      console.error("search tool rejected, falling back:", result.errText?.slice(0, 300));
+      result = await runEventsSearch(prompt, SEARCH_TOOL_VERSIONS[1]);
+    }
+    if (!result.ok) {
+      console.error("Anthropic API error:", result.status, result.errText?.slice(0, 500));
       res.status(502).json({ error: "Events search failed" });
       return;
     }
 
-    const data = await r.json();
+    const data = result.data;
     const text = (data.content || [])
       .filter((b) => b.type === "text")
       .map((b) => b.text || "")
       .join("\n");
     const match = text.match(/\{[\s\S]*\}/);
     if (!match) {
-      console.error("No events JSON in response:", text.slice(0, 300));
+      console.error("No events JSON. stop_reason:", data.stop_reason, "text:", text.slice(0, 300));
       res.status(502).json({ error: "Events search failed" });
       return;
     }
@@ -97,7 +120,7 @@ Respond ONLY with JSON, no markdown fences, no other text:
     try {
       events = JSON.parse(match[0]);
     } catch (e) {
-      console.error("Bad events JSON:", match[0].slice(0, 300));
+      console.error("Bad events JSON. stop_reason:", data.stop_reason, "json:", match[0].slice(0, 300));
       res.status(502).json({ error: "Events search failed" });
       return;
     }
