@@ -162,14 +162,16 @@ async function generatePlan({ ages, slots, location, planDate }, accessToken) {
 }
 
 // ---------- Live events (server-side web search; fires after the plan) ----------
-async function fetchTodaysEvents({ location, planDate, ages }, accessToken) {
+// Two focused requests (kind: "local" | "trip") run in parallel — each stays
+// under Vercel's function time limit and paints its section as it lands.
+async function fetchTodaysEvents({ location, planDate, ages, kind }, accessToken) {
   const res = await fetch("/api/fetch-events", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     },
-    body: JSON.stringify({ location, planDate, ages }),
+    body: JSON.stringify({ location, planDate, ages, kind }),
   });
   if (!res.ok) throw new Error("Events search failed");
   return await res.json();
@@ -383,14 +385,21 @@ export default function TheGoodHours() {
         setFreePlansUsed(freePlansUsed + 1);
       }
       // Live events stream in AFTER the plan is on screen (~30s web search) —
-      // a bonus, never a blocker
+      // a bonus, never a blocker. Local + worth-the-trip load in parallel and
+      // each section paints as soon as its results land.
       setEvents(null);
       setEventsPlanId(genId);
       setEventsLoading(true);
-      fetchTodaysEvents({ location, planDate, ages }, token)
-        .then((ev) => setEvents(ev))
-        .catch(() => setEvents({ local: [], worthTheTrip: [] }))
-        .finally(() => setEventsLoading(false));
+      const mergeEvents = (partial) =>
+        setEvents((prev) => ({ local: [], worthTheTrip: [], ...(prev || {}), ...partial }));
+      Promise.allSettled([
+        fetchTodaysEvents({ location, planDate, ages, kind: "local" }, token)
+          .then(mergeEvents)
+          .catch(() => mergeEvents({ local: [] })),
+        fetchTodaysEvents({ location, planDate, ages, kind: "trip" }, token)
+          .then(mergeEvents)
+          .catch(() => mergeEvents({ worthTheTrip: [] })),
+      ]).then(() => setEventsLoading(false));
     } catch (e) {
       if (e.message === "membership_required") {
         setPreviewUsed(true);

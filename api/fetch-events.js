@@ -1,8 +1,9 @@
 // /api/fetch-events.js
 // Live events search (server-side web search; key protected).
-// The client fires this AFTER the plan renders, so it is never a blocker.
-// Requires a logged-in user (Supabase JWT) because every call runs billable
-// web searches. Production v2 idea: event APIs + nightly cache per neighborhood.
+// Called TWICE in parallel by the client — kind: "local" | "trip" — so each
+// request runs one focused search and stays well under Vercel's 60s function
+// limit. Requires a logged-in user (Supabase JWT): every call is billable.
+// Production v2 idea: event APIs + nightly cache per neighborhood.
 
 async function getUserFromRequest(req) {
   const supaUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
@@ -17,16 +18,15 @@ async function getUserFromRequest(req) {
   return await r.json();
 }
 
-// Newest search tool first; fall back to the widely-available version if the
-// account/model rejects it with a 400.
+// Newest search tool first; fall back fast (400) to the widely-available one.
 const SEARCH_TOOL_VERSIONS = ["web_search_20260209", "web_search_20250305"];
 
 async function runEventsSearch(prompt, toolType) {
   let messages = [{ role: "user", content: prompt }];
   let data = null;
-  // server-side tool runs can pause mid-loop (stop_reason "pause_turn");
-  // resend the conversation to let the search finish, up to 3 rounds
-  for (let round = 0; round < 3; round++) {
+  // a server-side tool run can pause once (stop_reason "pause_turn");
+  // resend to let it finish — a single extra round keeps us inside the limit
+  for (let round = 0; round < 2; round++) {
     const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -36,9 +36,9 @@ async function runEventsSearch(prompt, toolType) {
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-6",
-        max_tokens: 2500,
+        max_tokens: 1500,
         messages,
-        tools: [{ type: toolType, name: "web_search", max_uses: 3 }],
+        tools: [{ type: toolType, name: "web_search", max_uses: 2 }],
       }),
     });
     if (!r.ok) {
@@ -49,6 +49,26 @@ async function runEventsSearch(prompt, toolType) {
     messages = [...messages, { role: "assistant", content: data.content }];
   }
   return { ok: true, data };
+}
+
+function buildPrompt({ kind, location, dayLabel, ages }) {
+  const intro = `You help caregivers find REAL kid-friendly happenings. Search the web for events happening on ${dayLabel} relevant to a caregiver in ${location} with kids aged ${ages.join(", ")}. Use at most 2 web searches, then answer.`;
+
+  if (kind === "trip") {
+    return `${intro}
+
+Find 2-3 special events that day across the wider city/region that justify a subway or car ride — kids' shows, museum special exhibits, family sports games with cheap tickets, big seasonal events. Include ticket price if findable. Only include events you found real evidence are happening on that date — if you find fewer, return fewer; never invent an event. The "cost" field must be 1-4 words MAX ("Free", "$30", "Free w/ registration") — details belong in "whyWorth" or "transitNote", never in cost.
+
+Respond ONLY with JSON, no markdown fences, no other text:
+{ "worthTheTrip": [ { "name": "", "time": "", "venue": "", "whyWorth": "one line on why it justifies the ride", "transitNote": "e.g. ~25 min on the 2/3 from ${location}", "cost": "$30" } ] }`;
+  }
+
+  return `${intro}
+
+Find events/happenings that day in or very near ${location} — street fairs, festivals, library specials, pop-ups, farmers markets with kid appeal. Only include events you found real evidence are happening on that date — if you find fewer, return fewer; never invent an event. For each, add ONE practical caregiver note (crowds, arrive early, stroller access, nap-timing). The "cost" field must be 1-4 words MAX ("Free", "$30", "Free w/ registration") — any registration details belong in the note, never in cost.
+
+Respond ONLY with JSON, no markdown fences, no other text:
+{ "local": [ { "name": "", "time": "2–7 PM", "venue": "", "note": "practical caveat, e.g. expect a crowd — go early", "cost": "Free" } ] }`;
 }
 
 export default async function handler(req, res) {
@@ -64,7 +84,7 @@ export default async function handler(req, res) {
       return;
     }
 
-    const { location = "", planDate = "", ages = [] } = req.body || {};
+    const { location = "", planDate = "", ages = [], kind = "local" } = req.body || {};
     const cleanAges = ages.filter((a) => String(a || "").trim());
     if (!location.trim() || !planDate) {
       res.status(400).json({ error: "Missing inputs" });
@@ -79,19 +99,7 @@ export default async function handler(req, res) {
       year: "numeric",
     });
 
-    const prompt = `Search the web for REAL kid-friendly events happening on ${dayLabel} for a caregiver in ${location} with kids aged ${cleanAges.join(", ")}.
-
-Two searches:
-1. LOCAL: events/happenings in or very near ${location} that day — street fairs, festivals, library specials, pop-ups, farmers markets with kid appeal.
-2. WORTH THE TRIP: 2-3 special events across the wider city/region that justify a subway or car ride — kids' shows, museum special exhibits, family sports games with cheap tickets, big seasonal events. Include ticket price if findable.
-
-Only include events you found real evidence are happening on that date. If you find fewer, return fewer — never invent an event. For each, add ONE practical caregiver note (crowds, arrive early, stroller access, nap-timing). The "cost" field must be 1-4 words MAX ("Free", "$30", "Free w/ registration") — any registration/reservation details belong in the note, never in cost.
-
-Respond ONLY with JSON, no markdown fences, no other text:
-{
-  "local": [ { "name": "", "time": "2–7 PM", "venue": "", "note": "practical caveat, e.g. expect a crowd — go early", "cost": "Free" } ],
-  "worthTheTrip": [ { "name": "", "time": "", "venue": "", "whyWorth": "one line on why it justifies the ride", "transitNote": "e.g. ~25 min on the 2/3 from Park Slope", "cost": "$30" } ]
-}`;
+    const prompt = buildPrompt({ kind, location, dayLabel, ages: cleanAges });
 
     let result = await runEventsSearch(prompt, SEARCH_TOOL_VERSIONS[0]);
     if (!result.ok && result.status === 400) {
@@ -111,7 +119,7 @@ Respond ONLY with JSON, no markdown fences, no other text:
       .join("\n");
     const match = text.match(/\{[\s\S]*\}/);
     if (!match) {
-      console.error("No events JSON. stop_reason:", data.stop_reason, "text:", text.slice(0, 300));
+      console.error("No events JSON. kind:", kind, "stop_reason:", data.stop_reason, "text:", text.slice(0, 300));
       res.status(502).json({ error: "Events search failed" });
       return;
     }
@@ -120,15 +128,20 @@ Respond ONLY with JSON, no markdown fences, no other text:
     try {
       events = JSON.parse(match[0]);
     } catch (e) {
-      console.error("Bad events JSON. stop_reason:", data.stop_reason, "json:", match[0].slice(0, 300));
+      console.error("Bad events JSON. kind:", kind, "json:", match[0].slice(0, 300));
       res.status(502).json({ error: "Events search failed" });
       return;
     }
 
-    res.status(200).json({
-      local: Array.isArray(events.local) ? events.local.slice(0, 4) : [],
-      worthTheTrip: Array.isArray(events.worthTheTrip) ? events.worthTheTrip.slice(0, 3) : [],
-    });
+    if (kind === "trip") {
+      res.status(200).json({
+        worthTheTrip: Array.isArray(events.worthTheTrip) ? events.worthTheTrip.slice(0, 3) : [],
+      });
+    } else {
+      res.status(200).json({
+        local: Array.isArray(events.local) ? events.local.slice(0, 4) : [],
+      });
+    }
   } catch (e) {
     console.error("fetch-events error:", e);
     res.status(500).json({ error: "Server error" });
