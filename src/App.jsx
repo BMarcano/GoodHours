@@ -135,16 +135,46 @@ const SEED_COMMUNITY = [
 ];
 
 // ---------- Featured listings (local kids' businesses pay for placement) ----------
-const SEED_FEATURED = [
-  {
-    id: "f1",
-    name: "Tiny Tumblers Gymnastics",
-    neighborhood: "Park Slope",
-    pitch: "Toddler open gym, weekdays 9–12. Free trial class for Good Hours members 💕",
-    ages: "walkers–5",
-    offer: "FREE TRIAL",
-  },
-];
+// Sponsors live in the `sponsors` table (Ashley manages rows from the dashboard).
+// The "get featured" link points at the owner's Typeform.
+const TYPEFORM_URL = "https://form.typeform.com/to/n2lqoAFp";
+
+function dbSponsorToUi(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    neighborhood: row.neighborhood,
+    pitch: row.pitch,
+    ages: row.ages,
+    offer: row.offer_label,
+  };
+}
+
+function FeaturedCard({ biz }) {
+  return (
+    <div
+      className="fade-up fade-up-2 rounded-3xl p-5 relative overflow-hidden"
+      style={{ background: C.card, border: `3px solid ${C.gold}`, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}
+    >
+      <div className="flex items-center justify-between">
+        <Pill tone="gold">📌 FEATURED{biz.neighborhood ? ` · ${biz.neighborhood}` : ""}</Pill>
+        {biz.offer && (
+          <span className="text-[10px] font-extrabold px-2 py-1 rounded-full" style={{ background: C.terraSoft, color: C.terra }}>
+            {biz.offer}
+          </span>
+        )}
+      </div>
+      <h3 className="font-extrabold mt-2" style={{ color: C.ink }}>{biz.name}</h3>
+      {biz.pitch && <p className="text-xs font-semibold mt-1 leading-relaxed" style={{ color: C.inkSoft }}>{biz.pitch}</p>}
+      <div className="flex items-center justify-between mt-3">
+        {biz.ages ? <Pill tone="sage">ages {biz.ages}</Pill> : <span />}
+        <button className="px-4 py-2 rounded-xl text-xs font-extrabold transition-all active:scale-95" style={{ background: C.gold, color: C.ink }}>
+          Claim offer →
+        </button>
+      </div>
+    </div>
+  );
+}
 
 // ---------- Plan generation (server-side, key protected) ----------
 async function generatePlan({ ages, slots, location, planDate }, accessToken) {
@@ -236,6 +266,7 @@ export default function TheGoodHours() {
   const [plan, setPlan] = useState(null);
   const [savedPlans, setSavedPlans] = useState([]);
   const [community, setCommunity] = useState(SEED_COMMUNITY);
+  const [featured, setFeatured] = useState(null); // one active sponsor from the sponsors table
   const [expandedPost, setExpandedPost] = useState(null);
   const [newComment, setNewComment] = useState("");
   // --- Trust & safety state ---
@@ -302,12 +333,14 @@ export default function TheGoodHours() {
     setDataLoading(true);
     (async () => {
       const fetchSub = () => supabase.from("subscriptions").select("status").eq("profile_id", userId).maybeSingle();
-      const [profileRes, subRes, plansRes] = await Promise.all([
+      const [profileRes, subRes, plansRes, sponsorRes] = await Promise.all([
         supabase.from("profiles").select("free_plans_used").eq("id", userId).maybeSingle(),
         fetchSub(),
         supabase.from("plans").select("*").eq("profile_id", userId).order("created_at", { ascending: false }),
+        supabase.from("sponsors").select("*").eq("active", true).order("created_at", { ascending: false }).limit(1),
       ]);
       if (cancelled) return;
+      setFeatured(sponsorRes.data?.[0] ? dbSponsorToUi(sponsorRes.data[0]) : null);
       const used = profileRes.data?.free_plans_used ?? 0;
       let member = subRes.data?.status === "active";
       // Back from Stripe checkout: the webhook can lag the redirect by a few seconds
@@ -911,6 +944,9 @@ export default function TheGoodHours() {
                     </div>
                   )}
 
+                  {/* Featured sponsor inside the plan — always labeled FEATURED */}
+                  {featured && <FeaturedCard biz={featured} />}
+
                   {/* ---- Live events: happening today + worth the trip ---- */}
                   {eventsPlanId === plan.id && eventsLoading && (
                     <div className="fade-up rounded-2xl px-4 py-3 flex items-center gap-2" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
@@ -1072,32 +1108,17 @@ export default function TheGoodHours() {
                 Real plans from real parents & caregivers near you. See what worked, steal a day, or join a meetup.
               </p>
 
-              {/* Featured listing — paid placement by neighborhood */}
-              {SEED_FEATURED.map((biz) => (
-                <div
-                  key={biz.id}
-                  className="fade-up fade-up-2 rounded-3xl p-5 relative overflow-hidden"
-                  style={{ background: C.card, border: `3px solid ${C.gold}`, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}
-                >
-                  <div className="flex items-center justify-between">
-                    <Pill tone="gold">📌 FEATURED · {biz.neighborhood}</Pill>
-                    <span className="text-[10px] font-extrabold px-2 py-1 rounded-full" style={{ background: C.terraSoft, color: C.terra }}>
-                      {biz.offer}
-                    </span>
-                  </div>
-                  <h3 className="font-extrabold mt-2" style={{ color: C.ink }}>{biz.name}</h3>
-                  <p className="text-xs font-semibold mt-1 leading-relaxed" style={{ color: C.inkSoft }}>{biz.pitch}</p>
-                  <div className="flex items-center justify-between mt-3">
-                    <Pill tone="sage">ages {biz.ages}</Pill>
-                    <button className="px-4 py-2 rounded-xl text-xs font-extrabold transition-all active:scale-95" style={{ background: C.gold, color: C.ink }}>
-                      Claim offer →
-                    </button>
-                  </div>
-                </div>
-              ))}
-              <p className="text-[10px] font-bold text-center" style={{ color: C.inkSoft }}>
+              {/* Featured listing — paid placement, managed via the sponsors table */}
+              {featured && <FeaturedCard biz={featured} />}
+              <a
+                href={TYPEFORM_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block text-[10px] font-bold text-center"
+                style={{ color: C.inkSoft }}
+              >
                 Own a kids' business? <span style={{ color: C.terra }}>Get featured in your neighborhood →</span>
-              </p>
+              </a>
               {community.map((post, i) => (
                 <div key={post.id} className={`fade-up fade-up-${Math.min(i + 1, 4)} rounded-3xl p-5`} style={{ background: post.mine ? C.sageSoft : C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
                   <div className="flex items-center justify-between">
