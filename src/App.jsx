@@ -267,6 +267,12 @@ export default function TheGoodHours() {
   const [savedPlans, setSavedPlans] = useState([]);
   const [community, setCommunity] = useState(SEED_COMMUNITY);
   const [featured, setFeatured] = useState(null); // one active sponsor from the sponsors table
+  // --- Admin (owner) sponsor management ---
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(false);
+  const [adminSponsors, setAdminSponsors] = useState([]);
+  const [sponsorForm, setSponsorForm] = useState(null); // null = form closed; object = adding/editing
+  const [adminBusy, setAdminBusy] = useState(false);
   const [expandedPost, setExpandedPost] = useState(null);
   const [newComment, setNewComment] = useState("");
   // --- Trust & safety state ---
@@ -320,6 +326,10 @@ export default function TheGoodHours() {
         setEvents(null);
         setEventsLoading(false);
         setEventsPlanId(null);
+        setIsAdmin(false);
+        setShowAdmin(false);
+        setAdminSponsors([]);
+        setSponsorForm(null);
       }
     });
     return () => subscription.unsubscribe();
@@ -333,14 +343,16 @@ export default function TheGoodHours() {
     setDataLoading(true);
     (async () => {
       const fetchSub = () => supabase.from("subscriptions").select("status").eq("profile_id", userId).maybeSingle();
-      const [profileRes, subRes, plansRes, sponsorRes] = await Promise.all([
+      const [profileRes, subRes, plansRes, sponsorRes, adminRes] = await Promise.all([
         supabase.from("profiles").select("free_plans_used").eq("id", userId).maybeSingle(),
         fetchSub(),
         supabase.from("plans").select("*").eq("profile_id", userId).order("created_at", { ascending: false }),
         supabase.from("sponsors").select("*").eq("active", true).order("created_at", { ascending: false }).limit(1),
+        supabase.rpc("is_admin"), // errors harmlessly (→ false) until migration 5 is applied
       ]);
       if (cancelled) return;
       setFeatured(sponsorRes.data?.[0] ? dbSponsorToUi(sponsorRes.data[0]) : null);
+      setIsAdmin(adminRes.data === true);
       const used = profileRes.data?.free_plans_used ?? 0;
       let member = subRes.data?.status === "active";
       // Back from Stripe checkout: the webhook can lag the redirect by a few seconds
@@ -366,6 +378,61 @@ export default function TheGoodHours() {
     })();
     return () => { cancelled = true; };
   }, [session?.user?.id]);
+
+  // --- Admin sponsor management (owner-only, gated by is_admin RLS) ---
+  async function loadAdminSponsors() {
+    const { data } = await supabase.from("sponsors").select("*").order("created_at", { ascending: false });
+    setAdminSponsors(data ?? []);
+  }
+  async function refreshFeatured() {
+    const { data } = await supabase.from("sponsors").select("*").eq("active", true).order("created_at", { ascending: false }).limit(1);
+    setFeatured(data?.[0] ? dbSponsorToUi(data[0]) : null);
+  }
+  function openAdmin() {
+    setShowAdmin(true);
+    setSponsorForm(null);
+    loadAdminSponsors();
+  }
+  function blankSponsor() {
+    setSponsorForm({ name: "", neighborhood: "", pitch: "", ages: "", offer_label: "", active: true });
+  }
+  async function saveSponsor() {
+    if (!sponsorForm?.name?.trim() || adminBusy) return;
+    setAdminBusy(true);
+    const payload = {
+      name: sponsorForm.name,
+      neighborhood: sponsorForm.neighborhood,
+      pitch: sponsorForm.pitch,
+      ages: sponsorForm.ages,
+      offer_label: sponsorForm.offer_label,
+      active: sponsorForm.active,
+    };
+    const res = sponsorForm.id
+      ? await supabase.from("sponsors").update(payload).eq("id", sponsorForm.id)
+      : await supabase.from("sponsors").insert(payload);
+    setAdminBusy(false);
+    if (!res.error) {
+      setSponsorForm(null);
+      await loadAdminSponsors();
+      await refreshFeatured();
+    }
+  }
+  async function toggleSponsorActive(row) {
+    if (adminBusy) return;
+    setAdminBusy(true);
+    await supabase.from("sponsors").update({ active: !row.active }).eq("id", row.id);
+    setAdminBusy(false);
+    await loadAdminSponsors();
+    await refreshFeatured();
+  }
+  async function deleteSponsor(id) {
+    if (adminBusy) return;
+    setAdminBusy(true);
+    await supabase.from("sponsors").delete().eq("id", id);
+    setAdminBusy(false);
+    await loadAdminSponsors();
+    await refreshFeatured();
+  }
 
   async function handleSendLink() {
     setLinkState("sending");
@@ -1108,6 +1175,17 @@ export default function TheGoodHours() {
                 Real plans from real parents & caregivers near you. See what worked, steal a day, or join a meetup.
               </p>
 
+              {/* Admin-only entry point to the visual sponsor manager */}
+              {isAdmin && (
+                <button
+                  onClick={openAdmin}
+                  className="w-full rounded-2xl py-2.5 text-xs font-extrabold flex items-center justify-center gap-1.5 border-2 transition-all active:scale-[.98]"
+                  style={{ borderColor: C.gold, color: "#9A5B00", background: C.goldSoft }}
+                >
+                  <Star size={13} fill="#9A5B00" /> Manage featured listings
+                </button>
+              )}
+
               {/* Featured listing — paid placement, managed via the sponsors table */}
               {featured && <FeaturedCard biz={featured} />}
               <a
@@ -1231,6 +1309,119 @@ export default function TheGoodHours() {
               <button onClick={() => { setShowVerify(false); setPendingAction(null); }} className="mt-2 w-full py-2.5 text-xs font-extrabold" style={{ color: C.inkSoft }}>
                 Maybe later
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* Admin: visual sponsor manager (owner-only) */}
+        {showAdmin && (
+          <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(46,41,78,.55)" }}>
+            <div className="w-full max-w-md rounded-t-[2rem] p-6 pb-8 fade-up max-h-[88vh] overflow-y-auto" style={{ background: C.cream }}>
+              <div className="w-10 h-1 rounded-full mx-auto mb-5" style={{ background: "#E5DFEF" }} />
+              <div className="flex items-center justify-between mb-1">
+                <h2 className="mnn-display text-2xl font-bold" style={{ color: C.ink }}>Featured listings</h2>
+                <button onClick={() => { setShowAdmin(false); setSponsorForm(null); }} className="p-1.5 rounded-lg" style={{ background: C.terraSoft, color: C.terra }}>
+                  <X size={18} />
+                </button>
+              </div>
+              <p className="text-xs font-semibold mb-4" style={{ color: C.inkSoft }}>
+                Add local businesses here. Only active listings show to members, one at a time (newest first).
+              </p>
+
+              {sponsorForm ? (
+                <div className="rounded-3xl p-5 space-y-3" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
+                  <h3 className="font-extrabold text-sm" style={{ color: C.ink }}>{sponsorForm.id ? "Edit listing" : "New listing"}</h3>
+                  {[
+                    { key: "name", label: "Business name", placeholder: "Tiny Tumblers Gymnastics" },
+                    { key: "neighborhood", label: "Neighborhood", placeholder: "Park Slope" },
+                    { key: "ages", label: "Ages", placeholder: "walkers–5" },
+                    { key: "offer_label", label: "Offer badge (short)", placeholder: "FREE TRIAL" },
+                  ].map((f) => (
+                    <div key={f.key}>
+                      <label className="text-[11px] font-extrabold" style={{ color: C.inkSoft }}>{f.label}</label>
+                      <input
+                        value={sponsorForm[f.key] || ""}
+                        onChange={(e) => setSponsorForm({ ...sponsorForm, [f.key]: e.target.value })}
+                        placeholder={f.placeholder}
+                        className="w-full mt-1 rounded-xl px-4 py-2.5 text-sm font-semibold outline-none border-2"
+                        style={{ borderColor: "#F3EBDA", color: C.ink, background: C.cream }}
+                      />
+                    </div>
+                  ))}
+                  <div>
+                    <label className="text-[11px] font-extrabold" style={{ color: C.inkSoft }}>Pitch (one or two lines)</label>
+                    <textarea
+                      value={sponsorForm.pitch || ""}
+                      onChange={(e) => setSponsorForm({ ...sponsorForm, pitch: e.target.value })}
+                      placeholder="Toddler open gym, weekdays 9–12. Free trial for Good Hours members."
+                      rows={2}
+                      className="w-full mt-1 rounded-xl px-4 py-2.5 text-sm font-semibold outline-none border-2 resize-none"
+                      style={{ borderColor: "#F3EBDA", color: C.ink, background: C.cream }}
+                    />
+                  </div>
+                  <button
+                    onClick={() => setSponsorForm({ ...sponsorForm, active: !sponsorForm.active })}
+                    className="flex items-center gap-2 text-xs font-extrabold"
+                    style={{ color: sponsorForm.active ? C.sage : C.inkSoft }}
+                  >
+                    <span className="w-9 h-5 rounded-full flex items-center px-0.5 transition-all" style={{ background: sponsorForm.active ? C.sage : "#DCD7EA", justifyContent: sponsorForm.active ? "flex-end" : "flex-start" }}>
+                      <span className="w-4 h-4 rounded-full" style={{ background: "#fff" }} />
+                    </span>
+                    {sponsorForm.active ? "Active (visible to members)" : "Hidden"}
+                  </button>
+                  <div className="flex gap-2 pt-1">
+                    <button onClick={() => setSponsorForm(null)} className="flex-1 rounded-2xl py-3 font-extrabold text-sm border-2" style={{ borderColor: C.ink, color: C.ink }}>
+                      Cancel
+                    </button>
+                    <button
+                      onClick={saveSponsor}
+                      disabled={!sponsorForm.name?.trim() || adminBusy}
+                      className="flex-1 rounded-2xl py-3 font-extrabold text-sm transition-all active:scale-[.98]"
+                      style={{ background: sponsorForm.name?.trim() ? C.terra : "#EAE6F2", color: sponsorForm.name?.trim() ? "#fff" : C.inkSoft }}
+                    >
+                      {adminBusy ? "Saving..." : "Save listing"}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <button
+                    onClick={blankSponsor}
+                    className="w-full rounded-2xl py-3.5 font-extrabold text-sm flex items-center justify-center gap-2 transition-all active:scale-[.98]"
+                    style={{ background: C.terra, color: "#fff", boxShadow: "0 6px 20px rgba(255,93,143,.4)" }}
+                  >
+                    <Plus size={16} /> Add a business
+                  </button>
+                  <div className="mt-3 space-y-2">
+                    {adminSponsors.length === 0 ? (
+                      <p className="text-center text-xs font-bold py-6" style={{ color: C.inkSoft }}>No listings yet — add your first one above.</p>
+                    ) : (
+                      adminSponsors.map((s) => (
+                        <div key={s.id} className="rounded-2xl p-4" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <h4 className="font-extrabold text-sm truncate" style={{ color: C.ink }}>{s.name}</h4>
+                              <p className="text-[11px] font-bold" style={{ color: C.inkSoft }}>{s.neighborhood || "—"}</p>
+                            </div>
+                            <Pill tone={s.active ? "sage" : "terra"}>{s.active ? "active" : "hidden"}</Pill>
+                          </div>
+                          <div className="flex gap-2 mt-3">
+                            <button onClick={() => toggleSponsorActive(s)} disabled={adminBusy} className="flex-1 rounded-xl py-2 text-[11px] font-extrabold border-2" style={{ borderColor: C.sage, color: C.sage }}>
+                              {s.active ? "Hide" : "Show"}
+                            </button>
+                            <button onClick={() => setSponsorForm({ ...s })} className="flex-1 rounded-xl py-2 text-[11px] font-extrabold border-2" style={{ borderColor: C.ink, color: C.ink }}>
+                              Edit
+                            </button>
+                            <button onClick={() => deleteSponsor(s.id)} disabled={adminBusy} className="flex-1 rounded-xl py-2 text-[11px] font-extrabold" style={{ background: C.terraSoft, color: C.terra }}>
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )}
