@@ -105,6 +105,7 @@ function dbSponsorToUi(row) {
     pitch: row.pitch,
     ages: row.ages,
     offer: row.offer_label,
+    link: row.link_url,
   };
 }
 
@@ -126,9 +127,19 @@ function FeaturedCard({ biz }) {
       {biz.pitch && <p className="text-xs font-semibold mt-1 leading-relaxed" style={{ color: C.inkSoft }}>{biz.pitch}</p>}
       <div className="flex items-center justify-between mt-3">
         {biz.ages ? <Pill tone="sage">ages {biz.ages}</Pill> : <span />}
-        <button className="px-4 py-2 rounded-xl text-xs font-extrabold transition-all active:scale-95" style={{ background: C.gold, color: C.ink }}>
-          Claim offer →
-        </button>
+        {biz.link ? (
+          <a
+            href={biz.link}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-4 py-2 rounded-xl text-xs font-extrabold transition-all active:scale-95 inline-block"
+            style={{ background: C.gold, color: C.ink }}
+          >
+            Claim offer →
+          </a>
+        ) : (
+          <span />
+        )}
       </div>
     </div>
   );
@@ -358,7 +369,7 @@ export default function TheGoodHours() {
     loadAdminSponsors();
   }
   function blankSponsor() {
-    setSponsorForm({ name: "", neighborhood: "", pitch: "", ages: "", offer_label: "", active: true });
+    setSponsorForm({ name: "", neighborhood: "", pitch: "", ages: "", offer_label: "", link_url: "", active: true });
   }
   async function saveSponsor() {
     if (!sponsorForm?.name?.trim() || adminBusy) return;
@@ -369,6 +380,7 @@ export default function TheGoodHours() {
       pitch: sponsorForm.pitch,
       ages: sponsorForm.ages,
       offer_label: sponsorForm.offer_label,
+      link_url: sponsorForm.link_url,
       active: sponsorForm.active,
     };
     const res = sponsorForm.id
@@ -1246,6 +1258,7 @@ export default function TheGoodHours() {
                     { key: "neighborhood", label: "Neighborhood", placeholder: "Park Slope" },
                     { key: "ages", label: "Ages", placeholder: "walkers–5" },
                     { key: "offer_label", label: "Offer badge (short)", placeholder: "FREE TRIAL" },
+                    { key: "link_url", label: "Claim offer link (where the button goes)", placeholder: "https://their-site.com/good-hours" },
                   ].map((f) => (
                     <div key={f.key}>
                       <label className="text-[11px] font-extrabold" style={{ color: C.inkSoft }}>{f.label}</label>
