@@ -223,6 +223,26 @@ function TabButton({ active, onClick, icon: Icon, label }) {
   );
 }
 
+// ---------- Native app (wrapper) detection ----------
+// Memberships are sold on the web only. Inside the iOS/Android app we hide the
+// purchase flow entirely so the app never sells digital goods — this keeps us
+// clear of App Store rule 3.1.1 and out of Apple's 30% cut.
+// Belt and suspenders: a persisted ?app=1 flag, the wrapper's JS bridge, or its
+// user agent. Set the app's start URL to https://www.thegoodhours.co/?app=1
+const NATIVE_FLAG_KEY = "gh_native_app";
+function detectNativeApp() {
+  if (typeof window === "undefined") return false;
+  try {
+    if (new URLSearchParams(window.location.search).get("app") === "1") {
+      localStorage.setItem(NATIVE_FLAG_KEY, "1");
+    }
+    if (localStorage.getItem(NATIVE_FLAG_KEY) === "1") return true;
+  } catch (e) { /* private mode — fall through to the other signals */ }
+  const bridge = window.natively;
+  if (bridge && (bridge.isIosApp || bridge.isAndroidApp)) return true;
+  return /natively/i.test(navigator.userAgent || "");
+}
+
 // ---------- Main App ----------
 export default function TheGoodHours() {
   const [tab, setTab] = useState("build"); // build | plan | saved | community
@@ -267,10 +287,18 @@ export default function TheGoodHours() {
   const [dataLoading, setDataLoading] = useState(true); // per-user data load after login
   const [saving, setSaving] = useState(false);
   const [checkoutState, setCheckoutState] = useState("idle"); // idle | loading | error
+  const [isNativeApp, setIsNativeApp] = useState(detectNativeApp);
   // --- Live events (load after the plan so they never block it) ---
   const [events, setEvents] = useState(null);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsPlanId, setEventsPlanId] = useState(null); // events belong to the plan that generated them
+
+  // The wrapper can inject its JS bridge after first paint — re-check once
+  useEffect(() => {
+    if (isNativeApp) return;
+    const t = setTimeout(() => setIsNativeApp(detectNativeApp()), 800);
+    return () => clearTimeout(t);
+  }, [isNativeApp]);
 
   // Session bootstrap: restore on load, then follow sign-in/sign-out events
   useEffect(() => {
@@ -785,10 +813,11 @@ export default function TheGoodHours() {
             Join the village 🏡
           </h1>
           <p className="text-sm font-bold mt-2 text-center leading-relaxed fade-up fade-up-1" style={{ color: C.inkSoft }}>
-            Your membership is what keeps this space safe — it funds selfie verification and moderation. We'd rather charge you $7 than sell your data.
+            Your membership is what keeps this space independent — no ads, no data selling, no noise. We'd rather charge you $7 than sell your data.
           </p>
 
-          {/* Plan cards */}
+          {/* Plan cards — hidden inside the app (no digital sales in-app) */}
+          {!isNativeApp && (
           <div className="flex gap-3 mt-6 fade-up fade-up-2">
             <button
               onClick={() => setBilling("month")}
@@ -812,13 +841,14 @@ export default function TheGoodHours() {
               <p className="text-[11px] font-bold mt-1" style={{ color: C.sage }}>≈ $5.83/mo</p>
             </button>
           </div>
+          )}
 
           {/* What you get */}
           <div className="mt-5 rounded-3xl p-5 space-y-2.5 fade-up fade-up-3" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
             {[
               ["✨", "Unlimited AI day plans for your exact kids, hours & neighborhood"],
               ["🏡", "Your neighborhood's community — parents, nannies & grandparents alike"],
-              ["🛡️", "Selfie-verified members only at every meetup"],
+              ["🛡️", "No ads, ever — and we never sell your data"],
               ["📌", "Save & reuse the days that actually worked"],
             ].map(([emoji, line]) => (
               <div key={line} className="flex items-start gap-2.5">
@@ -828,20 +858,33 @@ export default function TheGoodHours() {
             ))}
           </div>
 
-          <button
-            onClick={handleStartMembership}
-            disabled={checkoutState === "loading"}
-            className="mt-6 w-full rounded-2xl py-4 font-extrabold text-base transition-all active:scale-[.98] fade-up fade-up-4"
-            style={{ background: C.terra, color: "#fff", boxShadow: "0 6px 20px rgba(255,93,143,.4)" }}
-          >
-            {checkoutState === "loading"
-              ? "Starting checkout..."
-              : `Start my membership · ${billing === "year" ? "$70/yr" : "$7/mo"}`}
-          </button>
-          {checkoutState === "error" && (
-            <p className="mt-2 text-center text-xs font-extrabold fade-up" style={{ color: C.terra }}>
-              Couldn't start checkout — try again in a moment.
-            </p>
+          {isNativeApp ? (
+            <div className="mt-6 rounded-2xl px-4 py-4 text-center fade-up fade-up-4" style={{ background: C.goldSoft }}>
+              <p className="text-xs font-extrabold" style={{ color: "#9A5B00" }}>
+                Memberships are managed on our website
+              </p>
+              <p className="text-[11px] font-bold mt-1 leading-relaxed" style={{ color: "#C77800" }}>
+                Join at thegoodhours.co, then sign in here with the same email.
+              </p>
+            </div>
+          ) : (
+            <>
+              <button
+                onClick={handleStartMembership}
+                disabled={checkoutState === "loading"}
+                className="mt-6 w-full rounded-2xl py-4 font-extrabold text-base transition-all active:scale-[.98] fade-up fade-up-4"
+                style={{ background: C.terra, color: "#fff", boxShadow: "0 6px 20px rgba(255,93,143,.4)" }}
+              >
+                {checkoutState === "loading"
+                  ? "Starting checkout..."
+                  : `Start my membership · ${billing === "year" ? "$70/yr" : "$7/mo"}`}
+              </button>
+              {checkoutState === "error" && (
+                <p className="mt-2 text-center text-xs font-extrabold fade-up" style={{ color: C.terra }}>
+                  Couldn't start checkout — try again in a moment.
+                </p>
+              )}
+            </>
           )}
           {!previewUsed ? (
             <button
@@ -856,9 +899,11 @@ export default function TheGoodHours() {
               You've used your free plan — and it was a good one, right? 💛
             </p>
           )}
-          <p className="text-[10px] font-bold text-center mt-3" style={{ color: C.inkSoft }}>
-            Secure checkout via Stripe · cancel in two taps, no email required
-          </p>
+          {!isNativeApp && (
+            <p className="text-[10px] font-bold text-center mt-3" style={{ color: C.inkSoft }}>
+              Secure checkout via Stripe · cancel in two taps, no email required
+            </p>
+          )}
           <button onClick={handleSignOut} className="mt-4 w-full py-2 text-xs font-extrabold text-center" style={{ color: C.inkSoft }}>
             sign out
           </button>
