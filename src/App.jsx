@@ -895,7 +895,7 @@ export default function TheGoodHours() {
                         value={s.from}
                         onChange={(e) => setSlots(slots.map((x, j) => (j === i ? { ...x, from: e.target.value } : x)))}
                         placeholder="9:00 AM"
-                        className="flex-1 rounded-xl px-4 py-3 text-sm font-semibold outline-none border-2"
+                        className="flex-1 min-w-0 rounded-xl px-4 py-3 text-sm font-semibold outline-none border-2"
                         style={{ borderColor: "#F3EBDA", color: C.ink, background: C.cream }}
                       />
                       <span className="text-xs font-bold" style={{ color: C.inkSoft }}>to</span>
@@ -903,7 +903,7 @@ export default function TheGoodHours() {
                         value={s.to}
                         onChange={(e) => setSlots(slots.map((x, j) => (j === i ? { ...x, to: e.target.value } : x)))}
                         placeholder="12:00 PM"
-                        className="flex-1 rounded-xl px-4 py-3 text-sm font-semibold outline-none border-2"
+                        className="flex-1 min-w-0 rounded-xl px-4 py-3 text-sm font-semibold outline-none border-2"
                         style={{ borderColor: "#F3EBDA", color: C.ink, background: C.cream }}
                       />
                       {slots.length > 1 && (
