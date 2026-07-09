@@ -7,7 +7,7 @@ import { supabase } from "./supabaseClient";
 // Screens: Plan Builder → Generated Plan → My Plans → Community
 // Backend notes for Supabase dev are at the bottom of this file.
 // NOTE: plan generation runs server-side via /api/generate-plan
-// (Anthropic key protected). Auth is real Supabase magic link;
+// (Anthropic key protected). Auth is real Supabase email OTP (6-digit code);
 // plan persistence + subscriptions (Stripe) land in the next updates.
 // ------------------------------------------------------------------
 
@@ -251,7 +251,9 @@ export default function TheGoodHours() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true); // gate while restoring the session
   const [authStep, setAuthStep] = useState("paywall"); // paywall | app (login renders whenever there's no session)
-  const [linkState, setLinkState] = useState("idle"); // idle | sending | sent
+  const [authPhase, setAuthPhase] = useState("email"); // email | code
+  const [code, setCode] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
   const [previewMode, setPreviewMode] = useState(false); // free taste: 1 plan, no card
   const [previewUsed, setPreviewUsed] = useState(false);
@@ -283,7 +285,9 @@ export default function TheGoodHours() {
         setPlan(null);
         setSavedPlans([]);
         setTab("build");
-        setLinkState("idle");
+        setAuthPhase("email");
+        setCode("");
+        setAuthBusy(false);
         setAuthError("");
         setIsMember(false);
         setFreePlansUsed(0);
@@ -410,19 +414,38 @@ export default function TheGoodHours() {
     await refreshFeatured();
   }
 
-  async function handleSendLink() {
-    setLinkState("sending");
+  async function handleSendCode() {
+    setAuthBusy(true);
     setAuthError("");
-    const { error: otpError } = await supabase.auth.signInWithOtp({
-      email,
-      options: { emailRedirectTo: window.location.origin },
-    });
+    // sends a 6-digit code (the email template carries {{ .Token }}); works in
+    // the wrapped app too, since nothing has to reopen the app from a link
+    const { error: otpError } = await supabase.auth.signInWithOtp({ email });
+    setAuthBusy(false);
     if (otpError) {
-      setAuthError("Couldn't send the link — try again in a moment.");
-      setLinkState("idle");
+      setAuthError("Couldn't send the code — try again in a moment.");
     } else {
-      setLinkState("sent");
+      setAuthPhase("code");
+      setCode("");
     }
+  }
+
+  async function handleVerifyCode() {
+    const token = code.replace(/\D/g, "");
+    if (token.length < 6 || authBusy) return;
+    setAuthBusy(true);
+    setAuthError("");
+    const { error: vErr } = await supabase.auth.verifyOtp({ email, token, type: "email" });
+    if (vErr) {
+      setAuthError("That code didn't work — check it and try again.");
+      setAuthBusy(false);
+    }
+    // on success the auth listener sets the session and the app moves on
+  }
+
+  function resetAuth() {
+    setAuthPhase("email");
+    setCode("");
+    setAuthError("");
   }
 
   function handleSignOut() {
@@ -605,32 +628,72 @@ export default function TheGoodHours() {
             The hours with little kids either drag or shine.<br />We make them shine — with real caregivers nearby.
           </p>
           <div className="w-full mt-8 fade-up fade-up-3">
-            <input
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@email.com"
-              className="w-full rounded-2xl px-5 py-4 text-sm font-bold outline-none border-2 text-center"
-              style={{ borderColor: "#F3EBDA", color: C.ink, background: C.card }}
-            />
-            <button
-              disabled={!email.includes("@") || linkState !== "idle"}
-              onClick={handleSendLink}
-              className="mt-3 w-full rounded-2xl py-4 font-extrabold text-base transition-all active:scale-[.98]"
-              style={{
-                background: email.includes("@") ? C.terra : "#EAE6F2",
-                color: email.includes("@") ? "#fff" : C.inkSoft,
-                boxShadow: email.includes("@") ? "0 6px 20px rgba(255,93,143,.4)" : "none",
-              }}
-            >
-              {linkState === "sending" ? "Sending..." : linkState === "sent" ? "Link sent ✓" : "Continue →"}
-            </button>
-            <p className="text-[11px] font-bold text-center mt-3" style={{ color: authError ? C.terra : C.inkSoft }}>
-              {authError
-                ? authError
-                : linkState === "sent"
-                ? "Check your email and tap the magic link to hop in ✉️"
-                : "We'll email you a magic link — no password to remember. 🪄"}
-            </p>
+            {authPhase === "email" ? (
+              <>
+                <input
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && email.includes("@") && !authBusy) handleSendCode(); }}
+                  placeholder="you@email.com"
+                  type="email"
+                  autoComplete="email"
+                  className="w-full rounded-2xl px-5 py-4 text-sm font-bold outline-none border-2 text-center"
+                  style={{ borderColor: "#F3EBDA", color: C.ink, background: C.card }}
+                />
+                <button
+                  disabled={!email.includes("@") || authBusy}
+                  onClick={handleSendCode}
+                  className="mt-3 w-full rounded-2xl py-4 font-extrabold text-base transition-all active:scale-[.98]"
+                  style={{
+                    background: email.includes("@") ? C.terra : "#EAE6F2",
+                    color: email.includes("@") ? "#fff" : C.inkSoft,
+                    boxShadow: email.includes("@") ? "0 6px 20px rgba(255,93,143,.4)" : "none",
+                  }}
+                >
+                  {authBusy ? "Sending..." : "Continue →"}
+                </button>
+                <p className="text-[11px] font-bold text-center mt-3" style={{ color: authError ? C.terra : C.inkSoft }}>
+                  {authError ? authError : "We'll email you a 6-digit code — no password to remember. 🪄"}
+                </p>
+              </>
+            ) : (
+              <>
+                <input
+                  value={code}
+                  onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  onKeyDown={(e) => { if (e.key === "Enter" && code.replace(/\D/g, "").length === 6 && !authBusy) handleVerifyCode(); }}
+                  placeholder="••••••"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  className="w-full rounded-2xl px-5 py-4 text-2xl font-extrabold outline-none border-2 text-center"
+                  style={{ borderColor: "#F3EBDA", color: C.ink, background: C.card, letterSpacing: ".4em" }}
+                />
+                <button
+                  disabled={code.replace(/\D/g, "").length < 6 || authBusy}
+                  onClick={handleVerifyCode}
+                  className="mt-3 w-full rounded-2xl py-4 font-extrabold text-base transition-all active:scale-[.98]"
+                  style={{
+                    background: code.replace(/\D/g, "").length === 6 ? C.terra : "#EAE6F2",
+                    color: code.replace(/\D/g, "").length === 6 ? "#fff" : C.inkSoft,
+                    boxShadow: code.replace(/\D/g, "").length === 6 ? "0 6px 20px rgba(255,93,143,.4)" : "none",
+                  }}
+                >
+                  {authBusy ? "Verifying..." : "Verify →"}
+                </button>
+                <p className="text-[11px] font-bold text-center mt-3" style={{ color: authError ? C.terra : C.inkSoft }}>
+                  {authError ? authError : <>We sent a 6-digit code to <span style={{ color: C.ink }}>{email}</span> ✉️</>}
+                </p>
+                <div className="flex items-center justify-center gap-4 mt-2">
+                  <button onClick={resetAuth} className="text-[11px] font-extrabold" style={{ color: C.inkSoft }}>
+                    use a different email
+                  </button>
+                  <button onClick={handleSendCode} disabled={authBusy} className="text-[11px] font-extrabold" style={{ color: C.sage }}>
+                    resend code
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
