@@ -7,7 +7,7 @@ import { supabase } from "./supabaseClient";
 // Screens: Plan Builder → Generated Plan → My Plans → Community
 // Backend notes for Supabase dev are at the bottom of this file.
 // NOTE: plan generation runs server-side via /api/generate-plan
-// (Anthropic key protected). Auth is real Supabase email OTP (6-digit code);
+// (Anthropic key protected). Auth is Supabase email + password;
 // plan persistence + subscriptions (Stripe) land in the next updates.
 // ------------------------------------------------------------------
 
@@ -251,10 +251,13 @@ export default function TheGoodHours() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true); // gate while restoring the session
   const [authStep, setAuthStep] = useState("paywall"); // paywall | app (login renders whenever there's no session)
-  const [authPhase, setAuthPhase] = useState("email"); // email | code
-  const [code, setCode] = useState("");
+  const [authMode, setAuthMode] = useState("signin"); // signin | signup
+  const [password, setPassword] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [authNotice, setAuthNotice] = useState("");
+  const [recoveryMode, setRecoveryMode] = useState(false); // set-a-new-password screen
+  const [newPassword, setNewPassword] = useState("");
   const [previewMode, setPreviewMode] = useState(false); // free taste: 1 plan, no card
   const [previewUsed, setPreviewUsed] = useState(false);
   const [email, setEmail] = useState("");
@@ -275,7 +278,9 @@ export default function TheGoodHours() {
       setSession(data.session);
       setAuthLoading(false);
     });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, newSession) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, newSession) => {
+      // arriving from a "reset password" email: show the set-a-new-password screen
+      if (event === "PASSWORD_RECOVERY") setRecoveryMode(true);
       setSession(newSession);
       if (!newSession) {
         // signed out — wipe per-user state; login screen renders while session is null
@@ -285,10 +290,13 @@ export default function TheGoodHours() {
         setPlan(null);
         setSavedPlans([]);
         setTab("build");
-        setAuthPhase("email");
-        setCode("");
+        setAuthMode("signin");
+        setPassword("");
         setAuthBusy(false);
         setAuthError("");
+        setAuthNotice("");
+        setRecoveryMode(false);
+        setNewPassword("");
         setIsMember(false);
         setFreePlansUsed(0);
         setDataLoading(true);
@@ -414,38 +422,60 @@ export default function TheGoodHours() {
     await refreshFeatured();
   }
 
-  async function handleSendCode() {
-    setAuthBusy(true);
-    setAuthError("");
-    // sends a 6-digit code (the email template carries {{ .Token }}); works in
-    // the wrapped app too, since nothing has to reopen the app from a link
-    const { error: otpError } = await supabase.auth.signInWithOtp({ email });
-    setAuthBusy(false);
-    if (otpError) {
-      setAuthError("Couldn't send the code — try again in a moment.");
-    } else {
-      setAuthPhase("code");
-      setCode("");
-    }
-  }
+  const authReady = email.includes("@") && password.length >= 6;
 
-  async function handleVerifyCode() {
-    const token = code.replace(/\D/g, "");
-    if (token.length < 6 || authBusy) return;
+  async function handleAuthSubmit() {
+    if (!authReady || authBusy) return;
     setAuthBusy(true);
     setAuthError("");
-    const { error: vErr } = await supabase.auth.verifyOtp({ email, token, type: "email" });
-    if (vErr) {
-      setAuthError("That code didn't work — check it and try again.");
+    setAuthNotice("");
+    if (authMode === "signup") {
+      const { data, error: sErr } = await supabase.auth.signUp({ email, password });
       setAuthBusy(false);
+      if (sErr) {
+        setAuthError(/registered|exists/i.test(sErr.message) ? "That email already has an account — log in instead." : "Couldn't create your account — try again.");
+        return;
+      }
+      if (!data.session) {
+        // "Confirm email" is on in Supabase — they must confirm before logging in
+        setAuthNotice("Check your email to confirm your account, then log in.");
+        setAuthMode("signin");
+        setPassword("");
+      }
+      // otherwise the auth listener picks up the session and the app moves on
+    } else {
+      const { error: iErr } = await supabase.auth.signInWithPassword({ email, password });
+      setAuthBusy(false);
+      if (iErr) setAuthError("Wrong email or password — try again.");
     }
-    // on success the auth listener sets the session and the app moves on
   }
 
-  function resetAuth() {
-    setAuthPhase("email");
-    setCode("");
+  async function handleForgotPassword() {
+    if (!email.includes("@")) {
+      setAuthError("Type your email first, then tap forgot password.");
+      return;
+    }
+    setAuthBusy(true);
     setAuthError("");
+    setAuthNotice("");
+    const { error: rErr } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin });
+    setAuthBusy(false);
+    if (rErr) setAuthError("Couldn't send the reset email — try again.");
+    else setAuthNotice("We emailed you a link to reset your password.");
+  }
+
+  async function handleSetNewPassword() {
+    if (newPassword.length < 6 || authBusy) return;
+    setAuthBusy(true);
+    setAuthError("");
+    const { error: uErr } = await supabase.auth.updateUser({ password: newPassword });
+    setAuthBusy(false);
+    if (uErr) {
+      setAuthError("Couldn't update your password — try again.");
+    } else {
+      setRecoveryMode(false);
+      setNewPassword("");
+    }
   }
 
   function handleSignOut() {
@@ -610,6 +640,48 @@ export default function TheGoodHours() {
     );
   }
 
+  // ---------------- SET A NEW PASSWORD (arrived from the reset email) ----------------
+  if (recoveryMode) {
+    return (
+      <div className="mnn-root min-h-screen w-full flex justify-center" style={{ background: C.cream }}>
+        {FONT_LINK}
+        <div className="w-full max-w-md flex flex-col items-center justify-center px-8 min-h-screen">
+          <MnnLogo size={72} />
+          <h1 className="mnn-display text-3xl font-bold mt-4 text-center" style={{ color: C.ink }}>
+            Pick a new password
+          </h1>
+          <div className="w-full mt-6">
+            <input
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleSetNewPassword(); }}
+              placeholder="new password"
+              type="password"
+              autoComplete="new-password"
+              className="w-full rounded-2xl px-5 py-4 text-sm font-bold outline-none border-2 text-center"
+              style={{ borderColor: "#F3EBDA", color: C.ink, background: C.card }}
+            />
+            <button
+              disabled={newPassword.length < 6 || authBusy}
+              onClick={handleSetNewPassword}
+              className="mt-3 w-full rounded-2xl py-4 font-extrabold text-base transition-all active:scale-[.98]"
+              style={{
+                background: newPassword.length >= 6 ? C.terra : "#EAE6F2",
+                color: newPassword.length >= 6 ? "#fff" : C.inkSoft,
+                boxShadow: newPassword.length >= 6 ? "0 6px 20px rgba(255,93,143,.4)" : "none",
+              }}
+            >
+              {authBusy ? "Saving..." : "Save password →"}
+            </button>
+            <p className="text-[11px] font-bold text-center mt-3" style={{ color: authError ? C.terra : C.inkSoft }}>
+              {authError || "At least 6 characters."}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ---------------- LOGIN SCREEN ----------------
   if (!session) {
     return (
@@ -628,72 +700,64 @@ export default function TheGoodHours() {
             The hours with little kids either drag or shine.<br />We make them shine — with real caregivers nearby.
           </p>
           <div className="w-full mt-8 fade-up fade-up-3">
-            {authPhase === "email" ? (
-              <>
-                <input
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter" && email.includes("@") && !authBusy) handleSendCode(); }}
-                  placeholder="you@email.com"
-                  type="email"
-                  autoComplete="email"
-                  className="w-full rounded-2xl px-5 py-4 text-sm font-bold outline-none border-2 text-center"
-                  style={{ borderColor: "#F3EBDA", color: C.ink, background: C.card }}
-                />
-                <button
-                  disabled={!email.includes("@") || authBusy}
-                  onClick={handleSendCode}
-                  className="mt-3 w-full rounded-2xl py-4 font-extrabold text-base transition-all active:scale-[.98]"
-                  style={{
-                    background: email.includes("@") ? C.terra : "#EAE6F2",
-                    color: email.includes("@") ? "#fff" : C.inkSoft,
-                    boxShadow: email.includes("@") ? "0 6px 20px rgba(255,93,143,.4)" : "none",
-                  }}
-                >
-                  {authBusy ? "Sending..." : "Continue →"}
-                </button>
-                <p className="text-[11px] font-bold text-center mt-3" style={{ color: authError ? C.terra : C.inkSoft }}>
-                  {authError ? authError : "We'll email you a 6-digit code — no password to remember. 🪄"}
-                </p>
-              </>
-            ) : (
-              <>
-                <input
-                  value={code}
-                  onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                  onKeyDown={(e) => { if (e.key === "Enter" && code.replace(/\D/g, "").length === 6 && !authBusy) handleVerifyCode(); }}
-                  placeholder="••••••"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  maxLength={6}
-                  className="w-full rounded-2xl px-5 py-4 text-2xl font-extrabold outline-none border-2 text-center"
-                  style={{ borderColor: "#F3EBDA", color: C.ink, background: C.card, letterSpacing: ".4em" }}
-                />
-                <button
-                  disabled={code.replace(/\D/g, "").length < 6 || authBusy}
-                  onClick={handleVerifyCode}
-                  className="mt-3 w-full rounded-2xl py-4 font-extrabold text-base transition-all active:scale-[.98]"
-                  style={{
-                    background: code.replace(/\D/g, "").length === 6 ? C.terra : "#EAE6F2",
-                    color: code.replace(/\D/g, "").length === 6 ? "#fff" : C.inkSoft,
-                    boxShadow: code.replace(/\D/g, "").length === 6 ? "0 6px 20px rgba(255,93,143,.4)" : "none",
-                  }}
-                >
-                  {authBusy ? "Verifying..." : "Verify →"}
-                </button>
-                <p className="text-[11px] font-bold text-center mt-3" style={{ color: authError ? C.terra : C.inkSoft }}>
-                  {authError ? authError : <>We sent a 6-digit code to <span style={{ color: C.ink }}>{email}</span> ✉️</>}
-                </p>
-                <div className="flex items-center justify-center gap-4 mt-2">
-                  <button onClick={resetAuth} className="text-[11px] font-extrabold" style={{ color: C.inkSoft }}>
-                    use a different email
-                  </button>
-                  <button onClick={handleSendCode} disabled={authBusy} className="text-[11px] font-extrabold" style={{ color: C.sage }}>
-                    resend code
-                  </button>
-                </div>
-              </>
+            <input
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@email.com"
+              type="email"
+              autoComplete="email"
+              className="w-full rounded-2xl px-5 py-4 text-sm font-bold outline-none border-2 text-center"
+              style={{ borderColor: "#F3EBDA", color: C.ink, background: C.card }}
+            />
+            <input
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleAuthSubmit(); }}
+              placeholder="your password"
+              type="password"
+              autoComplete={authMode === "signup" ? "new-password" : "current-password"}
+              className="mt-3 w-full rounded-2xl px-5 py-4 text-sm font-bold outline-none border-2 text-center"
+              style={{ borderColor: "#F3EBDA", color: C.ink, background: C.card }}
+            />
+            <button
+              disabled={!authReady || authBusy}
+              onClick={handleAuthSubmit}
+              className="mt-3 w-full rounded-2xl py-4 font-extrabold text-base transition-all active:scale-[.98]"
+              style={{
+                background: authReady ? C.terra : "#EAE6F2",
+                color: authReady ? "#fff" : C.inkSoft,
+                boxShadow: authReady ? "0 6px 20px rgba(255,93,143,.4)" : "none",
+              }}
+            >
+              {authBusy ? "One sec..." : authMode === "signup" ? "Create account →" : "Log in →"}
+            </button>
+
+            {(authError || authNotice) && (
+              <p className="text-[11px] font-bold text-center mt-3" style={{ color: authError ? C.terra : C.sage }}>
+                {authError || authNotice}
+              </p>
             )}
+
+            <div className="flex items-center justify-center gap-4 mt-4">
+              <button
+                onClick={() => { setAuthMode(authMode === "signup" ? "signin" : "signup"); setAuthError(""); setAuthNotice(""); }}
+                className="text-[11px] font-extrabold"
+                style={{ color: C.terra }}
+              >
+                {authMode === "signup" ? "Already have an account? Log in" : "New here? Create an account"}
+              </button>
+              {authMode === "signin" && (
+                <button onClick={handleForgotPassword} disabled={authBusy} className="text-[11px] font-extrabold" style={{ color: C.inkSoft }}>
+                  Forgot password?
+                </button>
+              )}
+            </div>
+
+            <p className="text-[11px] font-bold text-center mt-3" style={{ color: C.inkSoft }}>
+              {authMode === "signup"
+                ? "Pick a password with at least 6 characters. 💛"
+                : "Welcome back — let's make today a good one. ☀️"}
+            </p>
           </div>
         </div>
       </div>
