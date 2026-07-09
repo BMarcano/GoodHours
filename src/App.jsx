@@ -92,48 +92,6 @@ function HostBadge() {
   );
 }
 
-// ---------- Mock community data (seeded; Supabase table later) ----------
-const SEED_COMMUNITY = [
-  {
-    id: "c1",
-    author: "Dana · Park Slope",
-    verified: true,
-    trustedHost: false,
-    title: "Rainy Tuesday, 2 kids (4 & 1)",
-    blocks: ["9:30 Brooklyn Public Library story time", "11:00 Little Gym open play", "12:30 lunch + nap reset at home"],
-    likes: 14,
-    comments: [
-      { who: "Priya", verified: true, text: "Story time was PACKED, get there 15 min early" },
-      { who: "Mel", verified: false, text: "Little Gym has a 2-for-1 sibling deal rn!" },
-    ],
-    meetup: null,
-  },
-  {
-    id: "c2",
-    author: "Jess · Astoria",
-    verified: true,
-    trustedHost: true,
-    title: "Friday park crawl (3yo, high energy)",
-    blocks: ["10:00 Astoria Park playground", "11:30 picnic by the pool lawn", "1:00 walk the track till she crashes"],
-    likes: 22,
-    comments: [{ who: "Sam", verified: true, text: "We did this exact plan — nap achieved by 1:40 😅" }],
-    meetup: { when: "Fri 10:00 AM", where: "Astoria Park playground", going: 4 },
-  },
-  {
-    id: "c3",
-    author: "Roxane · UWS",
-    verified: true,
-    trustedHost: true,
-    title: "Museum morning that actually worked (5yo)",
-    blocks: ["9:45 AMNH right at open — dinosaurs first", "11:15 snack at Margaret Mead Green", "12:00 home for quiet time"],
-    likes: 31,
-    comments: [
-      { who: "Tina", verified: true, text: "Going at open is the whole game. After 11 it's chaos." },
-    ],
-    meetup: { when: "Sat 9:45 AM", where: "AMNH main entrance", going: 7 },
-  },
-];
-
 // ---------- Featured listings (local kids' businesses pay for placement) ----------
 // Sponsors live in the `sponsors` table (Ashley manages rows from the dashboard).
 // The "get featured" link points at the owner's Typeform.
@@ -265,8 +223,11 @@ export default function TheGoodHours() {
   const [error, setError] = useState("");
   const [plan, setPlan] = useState(null);
   const [savedPlans, setSavedPlans] = useState([]);
-  const [community, setCommunity] = useState(SEED_COMMUNITY);
   const [featured, setFeatured] = useState(null); // one active sponsor from the sponsors table
+  // --- Community (Milestone 3): real public plans, likes, comments ---
+  const [communityLive, setCommunityLive] = useState(false); // owner-flipped toggle
+  const [feed, setFeed] = useState([]);
+  const [feedComments, setFeedComments] = useState({}); // { [planId]: comment[] }
   // --- Admin (owner) sponsor management ---
   const [isAdmin, setIsAdmin] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
@@ -275,12 +236,6 @@ export default function TheGoodHours() {
   const [adminBusy, setAdminBusy] = useState(false);
   const [expandedPost, setExpandedPost] = useState(null);
   const [newComment, setNewComment] = useState("");
-  // --- Trust & safety state ---
-  const [isVerified, setIsVerified] = useState(false);
-  const [showVerify, setShowVerify] = useState(false);
-  const [pendingAction, setPendingAction] = useState(null); // re-run after verify
-  const [meetupRated, setMeetupRated] = useState(false);
-  const [ratingTags, setRatingTags] = useState([]);
   // --- Auth + membership state ---
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true); // gate while restoring the session
@@ -330,6 +285,11 @@ export default function TheGoodHours() {
         setShowAdmin(false);
         setAdminSponsors([]);
         setSponsorForm(null);
+        setCommunityLive(false);
+        setFeed([]);
+        setFeedComments({});
+        setExpandedPost(null);
+        setNewComment("");
       }
     });
     return () => subscription.unsubscribe();
@@ -343,16 +303,20 @@ export default function TheGoodHours() {
     setDataLoading(true);
     (async () => {
       const fetchSub = () => supabase.from("subscriptions").select("status").eq("profile_id", userId).maybeSingle();
-      const [profileRes, subRes, plansRes, sponsorRes, adminRes] = await Promise.all([
+      const [profileRes, subRes, plansRes, sponsorRes, adminRes, cfgRes, feedRes] = await Promise.all([
         supabase.from("profiles").select("free_plans_used").eq("id", userId).maybeSingle(),
         fetchSub(),
         supabase.from("plans").select("*").eq("profile_id", userId).order("created_at", { ascending: false }),
         supabase.from("sponsors").select("*").eq("active", true).order("created_at", { ascending: false }).limit(1),
         supabase.rpc("is_admin"), // errors harmlessly (→ false) until migration 5 is applied
+        supabase.from("app_config").select("community_live").eq("id", 1).maybeSingle(),
+        supabase.rpc("community_feed"), // errors harmlessly (→ []) until migration 6 is applied
       ]);
       if (cancelled) return;
       setFeatured(sponsorRes.data?.[0] ? dbSponsorToUi(sponsorRes.data[0]) : null);
       setIsAdmin(adminRes.data === true);
+      setCommunityLive(cfgRes.data?.community_live === true);
+      setFeed(feedRes.data ?? []);
       const used = profileRes.data?.free_plans_used ?? 0;
       let member = subRes.data?.status === "active";
       // Back from Stripe checkout: the webhook can lag the redirect by a few seconds
@@ -453,19 +417,6 @@ export default function TheGoodHours() {
     supabase.auth.signOut(); // the auth listener above resets state back to the login screen
   }
 
-  // Gate: verified users only for public actions (comment, share, join meetup)
-  function requireVerified(actionFn) {
-    if (isVerified) { actionFn(); return; }
-    setPendingAction(() => actionFn);
-    setShowVerify(true);
-  }
-
-  function completeVerification() {
-    setIsVerified(true);
-    setShowVerify(false);
-    if (pendingAction) { pendingAction(); setPendingAction(null); }
-  }
-
   const canGenerate = ages.some((a) => a.trim()) && location.trim() && slots.some((s) => s.from && s.to);
 
   async function handleGenerate() {
@@ -559,44 +510,59 @@ export default function TheGoodHours() {
     if (eventsPlanId === plan.id) setEventsPlanId(saved.id); // keep events attached across the id change
     setPlan(saved);
     if (makePublic) {
-      setCommunity((prev) => [
-        {
-          id: "me-" + saved.id,
-          author: "You · " + saved.location,
-          verified: true,
-          trustedHost: false,
-          title: saved.title,
-          blocks: saved.blocks.map((b) => `${b.time} ${b.activity}`),
-          likes: 0,
-          comments: [],
-          meetup: null,
-          mine: true,
-        },
-        ...prev,
-      ]);
+      const { data: fresh } = await supabase.rpc("community_feed");
+      setFeed(fresh ?? []); // the newly public plan now shows in the real feed
     }
   }
 
-  function toggleLike(id) {
-    setCommunity((prev) => prev.map((p) => (p.id === id ? { ...p, likes: p.liked ? p.likes - 1 : p.likes + 1, liked: !p.liked } : p)));
+  async function toggleLike(planId) {
+    const item = feed.find((f) => f.id === planId);
+    if (!item || !session?.user?.id) return;
+    const liked = item.liked_by_me;
+    // optimistic; the DB write follows
+    setFeed((prev) => prev.map((f) => (f.id === planId ? { ...f, liked_by_me: !liked, like_count: Number(f.like_count) + (liked ? -1 : 1) } : f)));
+    if (liked) {
+      await supabase.from("plan_likes").delete().eq("plan_id", planId).eq("profile_id", session.user.id);
+    } else {
+      await supabase.from("plan_likes").insert({ plan_id: planId, profile_id: session.user.id });
+    }
   }
 
-  function addComment(id) {
-    if (!newComment.trim()) return;
-    setCommunity((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, comments: [...p.comments, { who: "You", verified: true, text: newComment }] } : p))
-    );
+  async function openComments(planId) {
+    if (expandedPost === planId) { setExpandedPost(null); return; }
+    setExpandedPost(planId);
     setNewComment("");
+    const { data } = await supabase.rpc("plan_comments_for", { p_plan_id: planId });
+    setFeedComments((prev) => ({ ...prev, [planId]: data ?? [] }));
   }
 
-  function joinMeetup(id) {
-    setCommunity((prev) =>
-      prev.map((p) =>
-        p.id === id && p.meetup
-          ? { ...p, meetup: { ...p.meetup, going: p.meetup.joined ? p.meetup.going - 1 : p.meetup.going + 1, joined: !p.meetup.joined } }
-          : p
-      )
-    );
+  async function addComment(planId) {
+    const body = (newComment || "").trim();
+    if (!body || !session?.user?.id) return;
+    const { error: cErr } = await supabase.from("plan_comments").insert({ plan_id: planId, profile_id: session.user.id, body });
+    if (cErr) return;
+    setNewComment("");
+    const { data } = await supabase.rpc("plan_comments_for", { p_plan_id: planId });
+    setFeedComments((prev) => ({ ...prev, [planId]: data ?? [] }));
+    setFeed((prev) => prev.map((f) => (f.id === planId ? { ...f, comment_count: Number(f.comment_count) + 1 } : f)));
+  }
+
+  async function deleteComment(planId, commentId) {
+    await supabase.from("plan_comments").delete().eq("id", commentId);
+    const { data } = await supabase.rpc("plan_comments_for", { p_plan_id: planId });
+    setFeedComments((prev) => ({ ...prev, [planId]: data ?? [] }));
+    setFeed((prev) => prev.map((f) => (f.id === planId ? { ...f, comment_count: Math.max(0, Number(f.comment_count) - 1) } : f)));
+  }
+
+  async function moderateRemovePost(planId) {
+    await supabase.from("plans").update({ is_public: false }).eq("id", planId); // admin unpublish
+    setFeed((prev) => prev.filter((f) => f.id !== planId));
+  }
+
+  async function toggleCommunityLive() {
+    const next = !communityLive;
+    setCommunityLive(next);
+    await supabase.from("app_config").update({ community_live: next, updated_at: new Date().toISOString() }).eq("id", 1);
   }
 
   // ---------------- AUTH SPLASH ----------------
@@ -1075,7 +1041,7 @@ export default function TheGoodHours() {
                     <button onClick={() => savePlan(false)} className="flex-1 rounded-2xl py-3.5 font-extrabold text-sm flex items-center justify-center gap-2 border-2 transition-all active:scale-[.98]" style={{ borderColor: C.ink, color: C.ink }}>
                       <Bookmark size={16} /> {plan.savedAt && !plan.isPublic ? "Saved ✓" : "Save private"}
                     </button>
-                    <button onClick={() => requireVerified(() => savePlan(true))} className="flex-1 rounded-2xl py-3.5 font-extrabold text-sm flex items-center justify-center gap-2 transition-all active:scale-[.98]" style={{ background: C.sage, color: "#fff" }}>
+                    <button onClick={() => savePlan(true)} className="flex-1 rounded-2xl py-3.5 font-extrabold text-sm flex items-center justify-center gap-2 transition-all active:scale-[.98]" style={{ background: C.sage, color: "#fff" }}>
                       <Globe size={16} /> {plan.isPublic ? "Shared ✓" : "Share public"}
                     </button>
                   </div>
@@ -1119,74 +1085,26 @@ export default function TheGoodHours() {
           {/* ---------------- COMMUNITY TAB ---------------- */}
           {tab === "community" && (
             <div className="space-y-3">
-              {/* Trust strip */}
+              {/* Trust strip (softened — selfie verification is a future phase) */}
               <div className="fade-up rounded-2xl px-4 py-3 flex items-center gap-2.5" style={{ background: C.sageSoft }}>
                 <ShieldCheck size={18} style={{ color: "#0E9488" }} className="shrink-0" />
                 <p className="text-[11px] font-bold leading-snug" style={{ color: "#0E7C72" }}>
-                  Every member who posts, comments, or joins a meetup is selfie-verified. Meetups happen in public places only.
+                  A space for real parents & caregivers to share the days that actually worked.
                 </p>
               </div>
 
-              {/* Post-meetup rating prompt */}
-              {!meetupRated ? (
-                <div className="fade-up fade-up-1 rounded-3xl p-5" style={{ background: C.ink }}>
-                  <div className="flex items-center gap-2">
-                    <Star size={16} fill={C.gold} style={{ color: C.gold }} />
-                    <p className="text-xs font-extrabold" style={{ color: C.gold }}>YOU WENT · Astoria Park crawl</p>
-                  </div>
-                  <h3 className="mnn-display text-lg font-bold mt-1" style={{ color: C.cream }}>How was Jess's meetup?</h3>
-                  <div className="flex flex-wrap gap-1.5 mt-3">
-                    {["Great group 💕", "Kids loved it", "Easy to find", "Would go again", "Not for us"].map((tag) => (
-                      <button
-                        key={tag}
-                        onClick={() => setRatingTags((t) => (t.includes(tag) ? t.filter((x) => x !== tag) : [...t, tag]))}
-                        className="px-3 py-1.5 rounded-full text-xs font-extrabold transition-all active:scale-95"
-                        style={{
-                          background: ratingTags.includes(tag) ? C.terra : "rgba(255,255,255,.12)",
-                          color: ratingTags.includes(tag) ? "#fff" : "#B8B3D1",
-                        }}
-                      >
-                        {tag}
-                      </button>
-                    ))}
-                  </div>
-                  <button
-                    onClick={() => setMeetupRated(true)}
-                    disabled={ratingTags.length === 0}
-                    className="mt-3 w-full rounded-xl py-2.5 text-xs font-extrabold transition-all active:scale-[.98]"
-                    style={{
-                      background: ratingTags.length ? C.gold : "rgba(255,255,255,.1)",
-                      color: ratingTags.length ? C.ink : "#6B6590",
-                    }}
-                  >
-                    Submit rating
-                  </button>
-                </div>
-              ) : (
-                <div className="fade-up fade-up-1 rounded-2xl px-4 py-3 flex items-center gap-2" style={{ background: C.goldSoft }}>
-                  <ThumbsUp size={15} style={{ color: "#C77800" }} />
-                  <p className="text-[11px] font-extrabold" style={{ color: "#9A5B00" }}>
-                    Thanks! Your rating counts toward Jess's Trusted Host badge.
-                  </p>
-                </div>
-              )}
-
-              <p className="text-xs font-bold px-1" style={{ color: C.inkSoft }}>
-                Real plans from real parents & caregivers near you. See what worked, steal a day, or join a meetup.
-              </p>
-
-              {/* Admin-only entry point to the visual sponsor manager */}
+              {/* Admin-only entry point to the visual admin panel */}
               {isAdmin && (
                 <button
                   onClick={openAdmin}
                   className="w-full rounded-2xl py-2.5 text-xs font-extrabold flex items-center justify-center gap-1.5 border-2 transition-all active:scale-[.98]"
                   style={{ borderColor: C.gold, color: "#9A5B00", background: C.goldSoft }}
                 >
-                  <Star size={13} fill="#9A5B00" /> Manage featured listings
+                  <Star size={13} fill="#9A5B00" /> Admin · community & featured
                 </button>
               )}
 
-              {/* Featured listing — paid placement, managed via the sponsors table */}
+              {/* Featured listing — always visible, even while community is "coming soon" */}
               {featured && <FeaturedCard biz={featured} />}
               <a
                 href={TYPEFORM_URL}
@@ -1197,121 +1115,97 @@ export default function TheGoodHours() {
               >
                 Own a kids' business? <span style={{ color: C.terra }}>Get featured in your neighborhood →</span>
               </a>
-              {community.map((post, i) => (
-                <div key={post.id} className={`fade-up fade-up-${Math.min(i + 1, 4)} rounded-3xl p-5`} style={{ background: post.mine ? C.sageSoft : C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-extrabold flex items-center gap-1.5 flex-wrap" style={{ color: C.sage }}>
-                      {post.author}
-                      {post.verified && <VerifiedBadge />}
-                      {post.trustedHost && <HostBadge />}
-                    </span>
-                    {post.mine && <Pill tone="sage">yours</Pill>}
-                  </div>
-                  <h3 className="font-extrabold mt-1" style={{ color: C.ink }}>{post.title}</h3>
-                  <ul className="mt-2 space-y-1">
-                    {post.blocks.map((b, j) => (
-                      <li key={j} className="text-xs font-semibold flex gap-1.5" style={{ color: C.inkSoft }}>
-                        <span style={{ color: C.terra }}>•</span> {b}
-                      </li>
-                    ))}
-                  </ul>
 
-                  {post.meetup && (
-                    <div className="mt-3 rounded-2xl p-3 flex items-center justify-between" style={{ background: C.goldSoft }}>
-                      <div>
-                        <p className="text-xs font-extrabold flex items-center gap-1" style={{ color: "#9A5B00" }}>
-                          <Calendar size={12} /> Meetup · {post.meetup.when}
-                        </p>
-                        <p className="text-[11px] font-bold mt-0.5" style={{ color: "#C77800" }}>
-                          {post.meetup.where} · {post.meetup.going} going · public place ✓
-                        </p>
-                      </div>
-                      <button
-                        onClick={() => requireVerified(() => joinMeetup(post.id))}
-                        className="px-3.5 py-2 rounded-xl text-xs font-extrabold transition-all active:scale-95"
-                        style={{
-                          background: post.meetup.joined ? "#9A5B00" : "#fff",
-                          color: post.meetup.joined ? "#fff" : "#9A5B00",
-                        }}
-                      >
-                        {post.meetup.joined ? "Going ✓" : "Join"}
-                      </button>
-                    </div>
-                  )}
-
-                  <div className="flex items-center gap-4 mt-3">
-                    <button onClick={() => toggleLike(post.id)} className="flex items-center gap-1.5 text-xs font-extrabold transition-all active:scale-95" style={{ color: post.liked ? C.terra : C.inkSoft }}>
-                      <Heart size={15} fill={post.liked ? C.terra : "none"} /> {post.likes}
-                    </button>
-                    <button onClick={() => setExpandedPost(expandedPost === post.id ? null : post.id)} className="flex items-center gap-1.5 text-xs font-extrabold" style={{ color: C.inkSoft }}>
-                      <MessageCircle size={15} /> {post.comments.length}
-                    </button>
-                  </div>
-
-                  {expandedPost === post.id && (
-                    <div className="mt-3 pt-3 space-y-2" style={{ borderTop: "2px solid #F3EBDA" }}>
-                      {post.comments.map((c, j) => (
-                        <div key={j} className="text-xs font-semibold" style={{ color: C.ink }}>
-                          <span className="font-extrabold" style={{ color: C.sage }}>{c.who}</span>
-                          {c.verified && <span className="mx-1 align-middle"><VerifiedBadge small /></span>}
-                          <span className="font-extrabold" style={{ color: C.sage }}>: </span>
-                          {c.text}
-                        </div>
-                      ))}
-                      <div className="flex gap-2 pt-1">
-                        <input
-                          value={newComment}
-                          onChange={(e) => setNewComment(e.target.value)}
-                          placeholder="What worked? What didn't?"
-                          className="flex-1 rounded-xl px-3 py-2 text-xs font-semibold outline-none border-2"
-                          style={{ borderColor: "#F3EBDA", background: C.cream, color: C.ink }}
-                        />
-                        <button onClick={() => requireVerified(() => addComment(post.id))} className="px-3.5 rounded-xl text-xs font-extrabold" style={{ background: C.ink, color: C.cream }}>
-                          Post
-                        </button>
-                      </div>
-                    </div>
-                  )}
+              {!communityLive ? (
+                <div className="fade-up rounded-3xl p-6 text-center" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
+                  <Users size={30} className="mx-auto mb-2" style={{ color: "#DCD7EA" }} />
+                  <h3 className="mnn-display text-xl font-bold" style={{ color: C.ink }}>Community coming soon 🌱</h3>
+                  <p className="text-xs font-semibold mt-1.5 leading-relaxed" style={{ color: C.inkSoft }}>
+                    Soon you'll share your best days and see what's working for parents near you. Stay tuned 💛
+                  </p>
                 </div>
-              ))}
+              ) : (
+                <>
+                  <p className="text-xs font-bold px-1" style={{ color: C.inkSoft }}>
+                    Real plans from real parents & caregivers near you. See what worked, steal a day, share your own.
+                  </p>
+                  {feed.length === 0 ? (
+                    <div className="text-center pt-10">
+                      <p className="font-bold" style={{ color: C.inkSoft }}>No shared plans yet.</p>
+                      <p className="text-xs font-semibold mt-1" style={{ color: C.inkSoft }}>Build a day and tap "Share public" to be the first!</p>
+                    </div>
+                  ) : (
+                    feed.map((post, i) => {
+                      const mine = post.author_id === session?.user?.id;
+                      return (
+                        <div key={post.id} className={`fade-up fade-up-${Math.min(i + 1, 4)} rounded-3xl p-5`} style={{ background: mine ? C.sageSoft : C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-extrabold min-w-0 truncate" style={{ color: C.sage }}>
+                              {post.author_name}{post.author_neighborhood ? ` · ${post.author_neighborhood}` : ""}
+                            </span>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {mine && <Pill tone="sage">yours</Pill>}
+                              {isAdmin && (
+                                <button onClick={() => moderateRemovePost(post.id)} className="text-[10px] font-extrabold px-2 py-1 rounded-full" style={{ background: C.terraSoft, color: C.terra }}>
+                                  remove
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          <h3 className="font-extrabold mt-1" style={{ color: C.ink }}>{post.title}</h3>
+                          <ul className="mt-2 space-y-1">
+                            {(post.blocks || []).map((b, j) => (
+                              <li key={j} className="text-xs font-semibold flex gap-1.5" style={{ color: C.inkSoft }}>
+                                <span style={{ color: C.terra }}>•</span> <span><span className="font-bold">{b.time}</span> {b.activity}</span>
+                              </li>
+                            ))}
+                          </ul>
+
+                          <div className="flex items-center gap-4 mt-3">
+                            <button onClick={() => toggleLike(post.id)} className="flex items-center gap-1.5 text-xs font-extrabold transition-all active:scale-95" style={{ color: post.liked_by_me ? C.terra : C.inkSoft }}>
+                              <Heart size={15} fill={post.liked_by_me ? C.terra : "none"} /> {Number(post.like_count)}
+                            </button>
+                            <button onClick={() => openComments(post.id)} className="flex items-center gap-1.5 text-xs font-extrabold" style={{ color: C.inkSoft }}>
+                              <MessageCircle size={15} /> {Number(post.comment_count)}
+                            </button>
+                          </div>
+
+                          {expandedPost === post.id && (
+                            <div className="mt-3 pt-3 space-y-2" style={{ borderTop: "2px solid #F3EBDA" }}>
+                              {(feedComments[post.id] || []).map((c) => {
+                                const mineC = c.author_id === session?.user?.id;
+                                return (
+                                  <div key={c.id} className="text-xs font-semibold flex items-start justify-between gap-2" style={{ color: C.ink }}>
+                                    <span><span className="font-extrabold" style={{ color: C.sage }}>{c.author_name}: </span>{c.body}</span>
+                                    {(mineC || isAdmin) && (
+                                      <button onClick={() => deleteComment(post.id, c.id)} className="shrink-0 text-[11px] font-extrabold px-1" style={{ color: C.inkSoft }}>✕</button>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                              <div className="flex gap-2 pt-1">
+                                <input
+                                  value={expandedPost === post.id ? newComment : ""}
+                                  onChange={(e) => setNewComment(e.target.value)}
+                                  placeholder="What worked? What didn't?"
+                                  className="flex-1 rounded-xl px-3 py-2 text-xs font-semibold outline-none border-2"
+                                  style={{ borderColor: "#F3EBDA", background: C.cream, color: C.ink }}
+                                />
+                                <button onClick={() => addComment(post.id)} className="px-3.5 rounded-xl text-xs font-extrabold" style={{ background: C.ink, color: C.cream }}>
+                                  Post
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </>
+              )}
             </div>
           )}
         </main>
-
-        {/* Verification sheet */}
-        {showVerify && (
-          <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(46,41,78,.55)" }}>
-            <div className="w-full max-w-md rounded-t-[2rem] p-6 pb-8 fade-up" style={{ background: C.card }}>
-              <div className="w-10 h-1 rounded-full mx-auto mb-5" style={{ background: "#E5DFEF" }} />
-              <div className="w-16 h-16 rounded-2xl mx-auto flex items-center justify-center" style={{ background: C.sageSoft }}>
-                <ShieldCheck size={30} style={{ color: "#0E9488" }} />
-              </div>
-              <h2 className="mnn-display text-2xl font-bold text-center mt-4" style={{ color: C.ink }}>
-                Real grown-ups only 💛
-              </h2>
-              <p className="text-sm font-semibold text-center mt-2 leading-relaxed" style={{ color: C.inkSoft }}>
-                To comment, share plans, or join meetups, take a quick selfie so we can confirm you're a real person. Parents, nannies, grandparents — everyone welcome, everyone verified. It keeps every playground meetup safe.
-              </p>
-              <ul className="mt-4 space-y-2">
-                {["Your selfie is never shown publicly", "Verified members get the badge on every post", "Browsing never requires verification"].map((line) => (
-                  <li key={line} className="flex items-start gap-2 text-xs font-bold" style={{ color: C.ink }}>
-                    <span style={{ color: C.sage }}>✓</span> {line}
-                  </li>
-                ))}
-              </ul>
-              <button
-                onClick={completeVerification}
-                className="mt-5 w-full rounded-2xl py-4 font-extrabold text-sm flex items-center justify-center gap-2 transition-all active:scale-[.98]"
-                style={{ background: C.terra, color: "#fff", boxShadow: "0 6px 20px rgba(255,93,143,.4)" }}
-              >
-                <Camera size={17} /> Take my selfie (demo: instant ✓)
-              </button>
-              <button onClick={() => { setShowVerify(false); setPendingAction(null); }} className="mt-2 w-full py-2.5 text-xs font-extrabold" style={{ color: C.inkSoft }}>
-                Maybe later
-              </button>
-            </div>
-          </div>
-        )}
 
         {/* Admin: visual sponsor manager (owner-only) */}
         {showAdmin && (
@@ -1319,14 +1213,30 @@ export default function TheGoodHours() {
             <div className="w-full max-w-md rounded-t-[2rem] p-6 pb-8 fade-up max-h-[88vh] overflow-y-auto" style={{ background: C.cream }}>
               <div className="w-10 h-1 rounded-full mx-auto mb-5" style={{ background: "#E5DFEF" }} />
               <div className="flex items-center justify-between mb-1">
-                <h2 className="mnn-display text-2xl font-bold" style={{ color: C.ink }}>Featured listings</h2>
+                <h2 className="mnn-display text-2xl font-bold" style={{ color: C.ink }}>Admin</h2>
                 <button onClick={() => { setShowAdmin(false); setSponsorForm(null); }} className="p-1.5 rounded-lg" style={{ background: C.terraSoft, color: C.terra }}>
                   <X size={18} />
                 </button>
               </div>
               <p className="text-xs font-semibold mb-4" style={{ color: C.inkSoft }}>
-                Add local businesses here. Only active listings show to members, one at a time (newest first).
+                Flip the community on when you're ready, and manage featured local businesses below.
               </p>
+
+              {/* Community on/off */}
+              <div className="rounded-3xl p-4 mb-4 flex items-center justify-between" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
+                <div className="min-w-0 pr-3">
+                  <p className="font-extrabold text-sm" style={{ color: C.ink }}>Community feed</p>
+                  <p className="text-[11px] font-semibold" style={{ color: C.inkSoft }}>
+                    {communityLive ? "Live - members can share, like & comment" : "Showing 'coming soon' to members"}
+                  </p>
+                </div>
+                <button onClick={toggleCommunityLive} className="shrink-0" aria-label="toggle community">
+                  <span className="w-11 h-6 rounded-full flex items-center px-0.5 transition-all" style={{ background: communityLive ? C.sage : "#DCD7EA", justifyContent: communityLive ? "flex-end" : "flex-start" }}>
+                    <span className="w-5 h-5 rounded-full" style={{ background: "#fff" }} />
+                  </span>
+                </button>
+              </div>
+              <p className="text-[11px] font-extrabold mb-2" style={{ color: C.inkSoft }}>FEATURED LISTINGS</p>
 
               {sponsorForm ? (
                 <div className="rounded-3xl p-5 space-y-3" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
