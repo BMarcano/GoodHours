@@ -7,3 +7,8 @@ dist-ssr
 .DS_Store
 .vercel
 HANDOFF.md
+
+# Apple signing / App Store Connect credentials — never commit
+*.p8
+*.p12
+*.mobileprovision
