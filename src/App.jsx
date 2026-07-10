@@ -834,11 +834,11 @@ export default function TheGoodHours() {
               style={{ borderColor: billing === "year" ? C.terra : "#F3EBDA", background: C.card }}
             >
               <span className="absolute -top-2.5 right-3 px-2 py-0.5 rounded-full text-[10px] font-extrabold" style={{ background: C.gold, color: C.ink }}>
-                2 MONTHS FREE
+                SAVE 40%
               </span>
               <p className="text-xs font-extrabold" style={{ color: C.inkSoft }}>YEARLY</p>
-              <p className="mnn-display text-2xl font-bold mt-1" style={{ color: C.ink }}>$70<span className="text-sm">/yr</span></p>
-              <p className="text-[11px] font-bold mt-1" style={{ color: C.sage }}>≈ $5.83/mo</p>
+              <p className="mnn-display text-2xl font-bold mt-1" style={{ color: C.ink }}>$50<span className="text-sm">/yr</span></p>
+              <p className="text-[11px] font-bold mt-1" style={{ color: C.sage }}>≈ $4.17/mo</p>
             </button>
           </div>
           )}
@@ -877,7 +877,7 @@ export default function TheGoodHours() {
               >
                 {checkoutState === "loading"
                   ? "Starting checkout..."
-                  : `Start my membership · ${billing === "year" ? "$70/yr" : "$7/mo"}`}
+                  : `Start my membership · ${billing === "year" ? "$50/yr" : "$7/mo"}`}
               </button>
               {checkoutState === "error" && (
                 <p className="mt-2 text-center text-xs font-extrabold fade-up" style={{ color: C.terra }}>
