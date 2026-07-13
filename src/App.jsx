@@ -145,6 +145,36 @@ function FeaturedCard({ biz }) {
   );
 }
 
+// Empty-state for the featured slot: invites a local business to claim it,
+// personalized with the viewer's neighborhood. Shows when no sponsor is active.
+function FeaturedInvite({ neighborhood }) {
+  return (
+    <a
+      href={TYPEFORM_URL}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="block fade-up fade-up-2 rounded-3xl p-5 relative overflow-hidden"
+      style={{ background: C.card, border: `3px dashed ${C.gold}`, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}
+    >
+      <div className="flex items-center justify-between">
+        <Pill tone="gold">📌 FEATURED{neighborhood ? ` · ${neighborhood}` : ""}</Pill>
+        <span className="text-[10px] font-extrabold px-2 py-1 rounded-full" style={{ background: C.terraSoft, color: C.terra }}>
+          YOUR SPOT
+        </span>
+      </div>
+      <h3 className="font-extrabold mt-2" style={{ color: C.ink }}>Own a local business?</h3>
+      <p className="text-xs font-semibold mt-1 leading-relaxed" style={{ color: C.inkSoft }}>
+        Tell {neighborhood || "your neighborhood"} families what you offer — get featured right here.
+      </p>
+      <div className="flex items-center justify-end mt-3">
+        <span className="px-4 py-2 rounded-xl text-xs font-extrabold" style={{ background: C.gold, color: C.ink }}>
+          Get featured →
+        </span>
+      </div>
+    </a>
+  );
+}
+
 // ---------- Plan generation (server-side, key protected) ----------
 async function generatePlan({ ages, slots, location, planDate }, accessToken) {
   const res = await fetch("/api/generate-plan", {
@@ -1288,17 +1318,23 @@ export default function TheGoodHours() {
                 </button>
               )}
 
-              {/* Featured listing — always visible, even while community is "coming soon" */}
-              {featured && <FeaturedCard biz={featured} />}
-              <a
-                href={TYPEFORM_URL}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block text-[10px] font-bold text-center"
-                style={{ color: C.inkSoft }}
-              >
-                Own a kids' business? <span style={{ color: C.terra }}>Get featured in your neighborhood →</span>
-              </a>
+              {/* Featured slot — a real paid sponsor, or an invite to become one */}
+              {featured ? (
+                <FeaturedCard biz={featured} />
+              ) : (
+                <FeaturedInvite neighborhood={(location && location.trim()) || savedPlans[0]?.location || ""} />
+              )}
+              {featured && (
+                <a
+                  href={TYPEFORM_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block text-[10px] font-bold text-center"
+                  style={{ color: C.inkSoft }}
+                >
+                  Own a kids' business? <span style={{ color: C.terra }}>Get featured in your neighborhood →</span>
+                </a>
+              )}
 
               {!communityLive ? (
                 <div className="fade-up rounded-3xl p-6 text-center" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
