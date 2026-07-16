@@ -530,6 +530,13 @@ export default function TheGoodHours() {
         return;
       }
       trackPixel("CompleteRegistration"); // account created (web only)
+      if (data.session?.access_token) {
+        // fire-and-forget: a welcome email must never block or fail a signup
+        fetch("/api/send-welcome", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${data.session.access_token}` },
+        }).catch(() => {});
+      }
       if (!data.session) {
         // "Confirm email" is on in Supabase — they must confirm before logging in
         setAuthNotice("Check your email to confirm your account, then log in.");

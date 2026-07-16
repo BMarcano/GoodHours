@@ -4,6 +4,7 @@
 // ROLE key (bypasses RLS — this endpoint is the table's only writer by design).
 import Stripe from "stripe";
 import crypto from "crypto";
+import { sendEmail, paymentEmail } from "./_email.js";
 
 export const config = { api: { bodyParser: false } };
 
@@ -128,12 +129,14 @@ export default async function handler(req, res) {
           const row = mapSubscription(sub);
           if (!row.profile_id) row.profile_id = s.metadata?.profile_id || null;
           await upsertSubscription(row);
+          const buyerEmail = s.customer_details?.email || s.customer_email;
           await trackMetaPurchase({
-            email: s.customer_details?.email || s.customer_email,
+            email: buyerEmail,
             value: (s.amount_total ?? 0) / 100,
             currency: (s.currency || "usd").toUpperCase(),
             eventId: s.id,
           });
+          await sendEmail(buyerEmail, paymentEmail());
         }
         break;
       }
