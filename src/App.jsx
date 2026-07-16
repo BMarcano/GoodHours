@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { Sun, MapPin, Clock, Heart, Users, Bookmark, Globe, MessageCircle, Sparkles, ChevronRight, Plus, X, Calendar, ThumbsUp, Baby, ShieldCheck, Star, Camera } from "lucide-react";
 import { supabase } from "./supabaseClient";
-import { initPixel, trackPixel } from "./pixel";
+import { initPixel, initGoogleTag, trackPixel, trackGa } from "./pixel";
 
 // ------------------------------------------------------------------
 // THE GOOD HOURS — MVP
@@ -358,10 +358,15 @@ export default function TheGoodHours() {
     return () => clearTimeout(t);
   }, [isNativeApp]);
 
-  // Meta Pixel — web only. Wait a beat so the wrapper's bridge can announce
-  // itself before we decide, then load it only if we're really on the web.
+  // Meta Pixel + Google Analytics — web only. Wait a beat so the wrapper's
+  // bridge can announce itself before we decide, then load only if we're
+  // really on the web.
   useEffect(() => {
-    const t = setTimeout(() => { if (!detectNativeApp()) initPixel(); }, 900);
+    const t = setTimeout(() => {
+      if (detectNativeApp()) return;
+      initPixel();
+      initGoogleTag();
+    }, 900);
     return () => clearTimeout(t);
   }, []);
 
@@ -530,6 +535,7 @@ export default function TheGoodHours() {
         return;
       }
       trackPixel("CompleteRegistration"); // account created (web only)
+      trackGa("sign_up");
       if (data.session?.access_token) {
         // fire-and-forget: a welcome email must never block or fail a signup
         fetch("/api/send-welcome", {
