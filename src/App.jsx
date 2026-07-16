@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { Sun, MapPin, Clock, Heart, Users, Bookmark, Globe, MessageCircle, Sparkles, ChevronRight, Plus, X, Calendar, ThumbsUp, Baby, ShieldCheck, Star, Camera } from "lucide-react";
 import { supabase } from "./supabaseClient";
+import { initPixel, trackPixel } from "./pixel";
 
 // ------------------------------------------------------------------
 // THE GOOD HOURS — MVP
@@ -357,6 +358,13 @@ export default function TheGoodHours() {
     return () => clearTimeout(t);
   }, [isNativeApp]);
 
+  // Meta Pixel — web only. Wait a beat so the wrapper's bridge can announce
+  // itself before we decide, then load it only if we're really on the web.
+  useEffect(() => {
+    const t = setTimeout(() => { if (!detectNativeApp()) initPixel(); }, 900);
+    return () => clearTimeout(t);
+  }, []);
+
   // Session bootstrap: restore on load, then follow sign-in/sign-out events
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -521,6 +529,7 @@ export default function TheGoodHours() {
         setAuthError(/registered|exists/i.test(sErr.message) ? "That email already has an account — log in instead." : "Couldn't create your account — try again.");
         return;
       }
+      trackPixel("CompleteRegistration"); // account created (web only)
       if (!data.session) {
         // "Confirm email" is on in Supabase — they must confirm before logging in
         setAuthNotice("Check your email to confirm your account, then log in.");

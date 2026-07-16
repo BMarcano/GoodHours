@@ -3,8 +3,50 @@
 // the RAW request body, then upserts public.subscriptions using the SERVICE
 // ROLE key (bypasses RLS — this endpoint is the table's only writer by design).
 import Stripe from "stripe";
+import crypto from "crypto";
 
 export const config = { api: { bodyParser: false } };
+
+// --- Meta Purchase event (Conversions API, server-side) ---
+// Fired from here rather than the browser so a payment is never missed when
+// someone closes the tab after checkout. Purchases only ever happen on the web,
+// so this doesn't make the mobile apps trackers.
+// Quietly does nothing until META_CAPI_TOKEN is set in the environment.
+const META_PIXEL_ID = "1057464993904809";
+
+function sha256(value) {
+  return crypto.createHash("sha256").update(String(value).trim().toLowerCase()).digest("hex");
+}
+
+async function trackMetaPurchase({ email, value, currency, eventId }) {
+  const token = process.env.META_CAPI_TOKEN;
+  if (!token) return;
+  try {
+    const r = await fetch(
+      `https://graph.facebook.com/v21.0/${META_PIXEL_ID}/events?access_token=${token}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          data: [
+            {
+              event_name: "Purchase",
+              event_time: Math.floor(Date.now() / 1000),
+              event_id: eventId, // lets Meta dedupe if a browser event ever fires too
+              action_source: "website",
+              event_source_url: "https://www.thegoodhours.co/",
+              user_data: email ? { em: [sha256(email)] } : {}, // hashed, never raw
+              custom_data: { value, currency },
+            },
+          ],
+        }),
+      }
+    );
+    if (!r.ok) console.error("Meta CAPI error:", r.status, await r.text());
+  } catch (e) {
+    console.error("Meta CAPI error:", e);
+  }
+}
 
 async function readRawBody(req) {
   const chunks = [];
@@ -86,6 +128,12 @@ export default async function handler(req, res) {
           const row = mapSubscription(sub);
           if (!row.profile_id) row.profile_id = s.metadata?.profile_id || null;
           await upsertSubscription(row);
+          await trackMetaPurchase({
+            email: s.customer_details?.email || s.customer_email,
+            value: (s.amount_total ?? 0) / 100,
+            currency: (s.currency || "usd").toUpperCase(),
+            eventId: s.id,
+          });
         }
         break;
       }
