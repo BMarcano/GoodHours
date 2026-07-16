@@ -24,6 +24,11 @@ const FONT_LINK = (
     .logo-bob { animation: bob 3.2s ease-in-out infinite; transform-origin: center; }
     @keyframes wiggle { 0%,100% { transform: rotate(-4deg); } 50% { transform: rotate(-1deg); } }
     .sticker-wiggle { animation: wiggle 2.6s ease-in-out infinite; display: inline-block; }
+    @keyframes dotBounce { 0%,80%,100% { transform: translateY(0); opacity: .4; } 40% { transform: translateY(-7px); opacity: 1; } }
+    .splash-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; animation: dotBounce 1.1s ease-in-out infinite; }
+    @media (prefers-reduced-motion: reduce) {
+      .logo-bob, .sticker-wiggle, .splash-dot, .fade-up { animation: none; }
+    }
   `}</style>
 );
 
@@ -64,6 +69,28 @@ function MnnLogo({ size = 52 }) {
       {/* big smile */}
       <path d="M24 36.5 Q32 44.5 40 36.5" fill="none" stroke="#2E294E" strokeWidth="2.8" strokeLinecap="round" />
     </svg>
+  );
+}
+
+// ---------- Splash: shown while the session and the user's data load ----------
+function SplashScreen() {
+  return (
+    <div className="mnn-root min-h-screen w-full flex flex-col items-center justify-center gap-6" style={{ background: C.cream }}>
+      {FONT_LINK}
+      <div className="fade-up"><MnnLogo size={96} /></div>
+      <h1 className="mnn-display text-4xl font-bold text-center leading-none tracking-tight fade-up fade-up-1" style={{ color: C.ink }}>
+        the
+        <span className="sticker-wiggle mx-1.5 px-2 rounded-lg" style={{ background: C.terra, color: "#fff", boxShadow: "2px 2px 0 #2E294E" }}>
+          good
+        </span>
+        hours
+      </h1>
+      <div className="flex gap-2 fade-up fade-up-2">
+        <span className="splash-dot" style={{ background: C.terra }} />
+        <span className="splash-dot" style={{ background: C.gold, animationDelay: ".15s" }} />
+        <span className="splash-dot" style={{ background: C.sage, animationDelay: ".3s" }} />
+      </div>
+    </div>
   );
 }
 
@@ -689,14 +716,7 @@ export default function TheGoodHours() {
   }
 
   // ---------------- AUTH SPLASH ----------------
-  if (authLoading) {
-    return (
-      <div className="mnn-root min-h-screen w-full flex items-center justify-center" style={{ background: C.cream }}>
-        {FONT_LINK}
-        <MnnLogo size={96} />
-      </div>
-    );
-  }
+  if (authLoading) return <SplashScreen />;
 
   // ---------------- SET A NEW PASSWORD (arrived from the reset email) ----------------
   if (recoveryMode) {
@@ -823,14 +843,7 @@ export default function TheGoodHours() {
   }
 
   // ---------------- DATA SPLASH (loading the user's profile/plans) ----------------
-  if (dataLoading) {
-    return (
-      <div className="mnn-root min-h-screen w-full flex items-center justify-center" style={{ background: C.cream }}>
-        {FONT_LINK}
-        <MnnLogo size={96} />
-      </div>
-    );
-  }
+  if (dataLoading) return <SplashScreen />;
 
   // ---------------- PAYWALL SCREEN ----------------
   if (authStep === "paywall") {
