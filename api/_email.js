@@ -2,8 +2,9 @@
 // Underscore-prefixed so Vercel treats this as a shared module, not an endpoint.
 // Quietly does nothing until RESEND_API_KEY is set and the domain is verified.
 
-const FROM = "The Good Hours <hello@thegoodhours.co>";
+const FROM = "The Good Hours <hello@thegoodhours.co>"; // a real mailbox, so replies reach a human
 const SITE = "https://www.thegoodhours.co";
+const APP_STORE = "https://apps.apple.com/app/the-good-hours/id6789680675";
 
 const P = 'style="font-family:\'Nunito\',Arial,sans-serif;font-size:15px;font-weight:600;line-height:1.65;color:#4a4666;margin:0 0 14px;"';
 const H = 'style="font-family:\'Baloo 2\',\'Trebuchet MS\',Arial,sans-serif;font-size:23px;font-weight:800;color:#2E294E;margin:0 0 14px;"';
@@ -55,23 +56,26 @@ export function welcomeEmail() {
   };
 }
 
-// EMAIL 2 — paid membership (draft, pending Ashley's approval)
+// EMAIL 2 — paid membership (copy by Ashley)
 export function paymentEmail() {
   return {
-    subject: "You're in — unlimited good hours ☀️",
-    preview: "Your membership is live. Go fill a day.",
+    subject: "You're in 💛",
+    preview: "Unlimited plans, saved days, and what's on near you today.",
     html: shell(
-      "Your membership is live. Go fill a day.",
-      `<p ${H}>You're in &#128155;</p>
-       <p ${P}>Your membership is live &mdash; and genuinely, thank you. Memberships are what keep this place free of ads and out of the data-selling business.</p>
-       <p ${P}><strong style="color:#2E294E;">What just unlocked:</strong></p>
-       <p ${LI}>&#10003; Unlimited day plans &mdash; any kids, any hours, any neighborhood</p>
-       <p ${LI}>&#10003; Save the days that actually worked and reuse them</p>
-       <p ${LI}>&#10003; Real local events happening the day you're planning for</p>
-       ${button("Plan my day &rarr;", SITE)}
-       <p ${P}>You can manage or cancel anytime at thegoodhours.co &mdash; two taps, no phone call, no guilt.</p>
+      "Unlimited plans, saved days, and what's on near you today.",
+      `<p ${H}>Hello from The Good Hours!</p>
+       <p ${P}>You're officially a member of The Good Hours and we're so excited to plan your kid-time 30 seconds at a time.</p>
+       <p ${P}><strong style="color:#2E294E;">Here's what's yours now:</strong></p>
+       <p ${LI}>&#10003; <strong style="color:#2E294E;">Unlimited day plans</strong> &mdash; every day, any neighborhood, any hours</p>
+       <p ${LI}>&#10003; <strong style="color:#2E294E;">Saved plans</strong> &mdash; keep the days that worked and run them back</p>
+       <p ${LI}>&#10003; <strong style="color:#2E294E;">Live local events</strong> &mdash; what's actually happening today, near you</p>
+       <p ${LI}>&#10003; <strong style="color:#2E294E;">Works anywhere</strong> &mdash; home, vacation, grandma's town</p>
+       <p ${LI}>&#10003; <strong style="color:#2E294E;">The community</strong> &mdash; plans from real parents and caregivers nearby (coming soon)</p>
+       ${button("Build today's day &rarr;", SITE)}
+       <p ${P}>Just us, you, and better hours.</p>
+       <p ${P}>Reply to this email anytime, it comes to us and we (real humans) reply!</p>
        <p ${P}>&mdash; The Good Hours Team</p>
-       <p style="font-family:'Nunito',Arial,sans-serif;font-size:13px;font-weight:600;line-height:1.6;color:#8E89A8;margin:18px 0 0;">P.S. Now throw the hard days at it. Rainy Tuesday? Long weekend with both kids? That's where it earns its keep.</p>`
+       <p style="font-family:'Nunito',Arial,sans-serif;font-size:13px;font-weight:600;line-height:1.6;color:#8E89A8;margin:18px 0 0;">P.S. Also on the App Store if you want it on your home screen: <a href="${APP_STORE}" style="color:#FF5D8F;font-weight:800;text-decoration:none;">get the app &rarr;</a></p>`
     ),
   };
 }
