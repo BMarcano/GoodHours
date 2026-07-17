@@ -323,6 +323,8 @@ export default function TheGoodHours() {
   const [adminSponsors, setAdminSponsors] = useState([]);
   const [sponsorForm, setSponsorForm] = useState(null); // null = form closed; object = adding/editing
   const [adminBusy, setAdminBusy] = useState(false);
+  const [adminUsers, setAdminUsers] = useState([]); // signups, admin-only
+  const [emailsCopied, setEmailsCopied] = useState(false);
   const [expandedPost, setExpandedPost] = useState(null);
   const [newComment, setNewComment] = useState("");
   // --- Auth + membership state ---
@@ -406,6 +408,7 @@ export default function TheGoodHours() {
         setShowAdmin(false);
         setAdminSponsors([]);
         setSponsorForm(null);
+        setAdminUsers([]);
         setCommunityLive(false);
         setFeed([]);
         setFeedComments({});
@@ -473,10 +476,22 @@ export default function TheGoodHours() {
     const { data } = await supabase.from("sponsors").select("*").eq("active", true).order("created_at", { ascending: false }).limit(1);
     setFeatured(data?.[0] ? dbSponsorToUi(data[0]) : null);
   }
+  async function loadAdminUsers() {
+    const { data } = await supabase.rpc("admin_users_list");
+    setAdminUsers(data ?? []);
+  }
+  function copyEmails() {
+    const list = adminUsers.map((u) => u.email).join(", ");
+    navigator.clipboard.writeText(list).then(() => {
+      setEmailsCopied(true);
+      setTimeout(() => setEmailsCopied(false), 1600);
+    });
+  }
   function openAdmin() {
     setShowAdmin(true);
     setSponsorForm(null);
     loadAdminSponsors();
+    loadAdminUsers();
   }
   function blankSponsor() {
     setSponsorForm({ name: "", neighborhood: "", pitch: "", ages: "", offer_label: "", link_url: "", active: true });
@@ -1585,6 +1600,44 @@ export default function TheGoodHours() {
                         </div>
                       ))
                     )}
+                  </div>
+
+                  {/* Signups — admin-only view of who's joined */}
+                  <p className="text-[11px] font-extrabold mt-6 mb-2" style={{ color: C.inkSoft }}>SIGNUPS</p>
+                  <div className="rounded-3xl p-4" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
+                    <div className="flex items-end justify-between mb-3">
+                      <div>
+                        <p className="mnn-display text-3xl font-bold leading-none" style={{ color: C.ink }}>{adminUsers.length}</p>
+                        <p className="text-[11px] font-bold mt-1" style={{ color: C.sage }}>
+                          {adminUsers.filter((u) => u.is_member).length} paying members
+                        </p>
+                      </div>
+                      <button
+                        onClick={copyEmails}
+                        disabled={adminUsers.length === 0}
+                        className="px-3 py-2 rounded-xl text-[11px] font-extrabold border-2 transition-all active:scale-95"
+                        style={{ borderColor: C.sage, color: C.sage }}
+                      >
+                        {emailsCopied ? "Copied ✓" : "Copy all emails"}
+                      </button>
+                    </div>
+                    <div className="space-y-2 max-h-60 overflow-y-auto">
+                      {adminUsers.length === 0 ? (
+                        <p className="text-center text-xs font-bold py-4" style={{ color: C.inkSoft }}>No signups yet.</p>
+                      ) : (
+                        adminUsers.map((u) => (
+                          <div key={u.email} className="flex items-center justify-between gap-2">
+                            <span className="text-[11px] font-bold truncate" style={{ color: C.ink }}>{u.email}</span>
+                            <span className="flex items-center gap-1.5 shrink-0">
+                              {u.is_member && <Pill tone="sage">paying</Pill>}
+                              <span className="text-[10px] font-bold" style={{ color: C.inkSoft }}>
+                                {new Date(u.created_at).toLocaleDateString()}
+                              </span>
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
                   </div>
                 </>
               )}
