@@ -2,7 +2,7 @@
 // Underscore-prefixed so Vercel treats this as a shared module, not an endpoint.
 // Quietly does nothing until RESEND_API_KEY is set and the domain is verified.
 
-const FROM = "The Good Hours <hello@thegoodhours.co>"; // a real mailbox, so replies reach a human
+const FROM = "The Good Hours Team <hello@thegoodhours.co>"; // a real mailbox, so replies reach a human
 const SITE = "https://www.thegoodhours.co";
 const APP_STORE = "https://apps.apple.com/app/the-good-hours/id6789680675";
 
