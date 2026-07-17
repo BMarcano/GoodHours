@@ -477,7 +477,8 @@ export default function TheGoodHours() {
     setFeatured(data?.[0] ? dbSponsorToUi(data[0]) : null);
   }
   async function loadAdminUsers() {
-    const { data } = await supabase.rpc("admin_users_list");
+    const { data, error: uErr } = await supabase.rpc("admin_users_list");
+    if (uErr) console.error("admin_users_list failed:", uErr.message); // e.g. migration 8 not run
     setAdminUsers(data ?? []);
   }
   function copyEmails() {
