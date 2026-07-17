@@ -82,7 +82,14 @@ export function paymentEmail() {
 
 export async function sendEmail(to, { subject, preview, html }) {
   const key = process.env.RESEND_API_KEY;
-  if (!key || !to) return;
+  if (!key) {
+    console.error("RESEND_API_KEY is not set — no email sent to", to);
+    return;
+  }
+  if (!to) {
+    console.error("sendEmail called without a recipient");
+    return;
+  }
   try {
     const r = await fetch("https://api.resend.com/emails", {
       method: "POST",
