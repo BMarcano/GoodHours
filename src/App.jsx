@@ -27,6 +27,11 @@ const FONT_LINK = (
     .sticker-wiggle { animation: wiggle 2.6s ease-in-out infinite; display: inline-block; }
     @keyframes dotBounce { 0%,80%,100% { transform: translateY(0); opacity: .4; } 40% { transform: translateY(-7px); opacity: 1; } }
     .splash-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; animation: dotBounce 1.1s ease-in-out infinite; }
+    @keyframes barSlide { 0% { left: -45%; } 100% { left: 100%; } }
+    .build-bar { position: relative; overflow: hidden; }
+    .build-bar > span { position: absolute; top: 0; bottom: 0; width: 45%; border-radius: 999px; animation: barSlide 1.5s ease-in-out infinite; }
+    @keyframes msgIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+    .build-msg { animation: msgIn .4s ease both; }
     @media (prefers-reduced-motion: reduce) {
       .logo-bob, .sticker-wiggle, .splash-dot, .fade-up { animation: none; }
     }
@@ -72,6 +77,17 @@ function MnnLogo({ size = 52 }) {
     </svg>
   );
 }
+
+// What we tell people while their day is being built. Each line is something
+// that's genuinely happening, and rotating them makes the wait feel shorter.
+const BUILD_STEPS = [
+  "Reading your kids' ages…",
+  "Scouting spots near you…",
+  "Checking what's actually open today…",
+  "Working around nap windows…",
+  "Finding a coffee stop for the grown-up…",
+  "Putting your day in order…",
+];
 
 // ---------- Splash: shown while the session and the user's data load ----------
 function SplashScreen() {
@@ -325,6 +341,7 @@ export default function TheGoodHours() {
   const [adminBusy, setAdminBusy] = useState(false);
   const [adminUsers, setAdminUsers] = useState([]); // signups, admin-only
   const [emailsCopied, setEmailsCopied] = useState(false);
+  const [buildStep, setBuildStep] = useState(0); // rotating copy while a plan generates
   const [expandedPost, setExpandedPost] = useState(null);
   const [newComment, setNewComment] = useState("");
   // --- Auth + membership state ---
@@ -371,6 +388,13 @@ export default function TheGoodHours() {
     }, 900);
     return () => clearTimeout(t);
   }, []);
+
+  // Cycle the "building your day" copy while a plan generates
+  useEffect(() => {
+    if (!loading) { setBuildStep(0); return; }
+    const id = setInterval(() => setBuildStep((s) => (s + 1) % BUILD_STEPS.length), 3200);
+    return () => clearInterval(id);
+  }, [loading]);
 
   // Session bootstrap: restore on load, then follow sign-in/sign-out events
   useEffect(() => {
@@ -1477,6 +1501,25 @@ export default function TheGoodHours() {
             </div>
           )}
         </main>
+
+        {/* Building your day — full-screen so it's unmistakable that work is happening */}
+        {loading && (
+          <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-6 px-10" style={{ background: C.cream }}>
+            <MnnLogo size={88} />
+            <h2 className="mnn-display text-3xl font-bold text-center leading-tight" style={{ color: C.ink }}>
+              Building your day
+            </h2>
+            <p key={buildStep} className="build-msg text-sm font-bold text-center min-h-[40px]" style={{ color: C.inkSoft }}>
+              {BUILD_STEPS[buildStep]}
+            </p>
+            <div className="build-bar w-full max-w-[220px] h-2 rounded-full" style={{ background: C.terraSoft }}>
+              <span style={{ background: C.terra }} />
+            </div>
+            <p className="text-[11px] font-bold text-center" style={{ color: C.inkSoft }}>
+              Worth the wait — we're checking real places, not guessing 💛
+            </p>
+          </div>
+        )}
 
         {/* Admin: visual sponsor manager (owner-only) */}
         {showAdmin && (
