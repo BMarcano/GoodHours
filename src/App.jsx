@@ -78,6 +78,15 @@ function MnnLogo({ size = 52 }) {
   );
 }
 
+// The user's LOCAL calendar date as YYYY-MM-DD. Never use toISOString() for
+// this: it converts to UTC, so anyone west of Greenwich gets tomorrow's date
+// during their evening — which shifted every plan a day forward.
+function localDateStr(d = new Date()) {
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
 // What we tell people while their day is being built. Each line is something
 // that's genuinely happening, and rotating them makes the wait feel shorter.
 const BUILD_STEPS = [
@@ -323,7 +332,7 @@ export default function TheGoodHours() {
   const [ages, setAges] = useState([""]);
   const [slots, setSlots] = useState([{ from: "9:00 AM", to: "12:00 PM" }]);
   const [location, setLocation] = useState("");
-  const [planDate, setPlanDate] = useState(new Date().toISOString().slice(0, 10)); // defaults to today
+  const [planDate, setPlanDate] = useState(localDateStr()); // defaults to today, in the user's own timezone
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [plan, setPlan] = useState(null);
@@ -348,7 +357,7 @@ export default function TheGoodHours() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true); // gate while restoring the session
   const [authStep, setAuthStep] = useState("paywall"); // paywall | app (login renders whenever there's no session)
-  const [authMode, setAuthMode] = useState("signin"); // signin | signup
+  const [authMode, setAuthMode] = useState("signup"); // signup | signin — most arrivals are new, so lead with signing up
   const [password, setPassword] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
@@ -414,7 +423,7 @@ export default function TheGoodHours() {
         setPlan(null);
         setSavedPlans([]);
         setTab("build");
-        setAuthMode("signin");
+        setAuthMode("signup");
         setPassword("");
         setAuthBusy(false);
         setAuthError("");
@@ -895,7 +904,7 @@ export default function TheGoodHours() {
 
             <p className="text-[11px] font-bold text-center mt-3" style={{ color: C.inkSoft }}>
               {authMode === "signup"
-                ? "Pick a password with at least 6 characters. 💛"
+                ? "Your first day plan is free — no card, no catch. 💛"
                 : "Welcome back — let's make today a good one. ☀️"}
             </p>
           </div>
@@ -1159,8 +1168,8 @@ export default function TheGoodHours() {
                 </div>
                 <div className="flex gap-2 items-center flex-wrap">
                   {[
-                    { label: "Today", value: new Date().toISOString().slice(0, 10) },
-                    { label: "Tomorrow", value: new Date(Date.now() + 86400000).toISOString().slice(0, 10) },
+                    { label: "Today", value: localDateStr() },
+                    { label: "Tomorrow", value: localDateStr(new Date(Date.now() + 86400000)) },
                   ].map((d) => (
                     <button
                       key={d.label}
@@ -1178,7 +1187,7 @@ export default function TheGoodHours() {
                   <input
                     type="date"
                     value={planDate}
-                    min={new Date().toISOString().slice(0, 10)}
+                    min={localDateStr()}
                     onChange={(e) => e.target.value && setPlanDate(e.target.value)}
                     className="flex-1 min-w-[130px] rounded-xl px-3 py-2 text-xs font-extrabold outline-none border-2"
                     style={{ borderColor: "#F3EBDA", color: C.ink, background: C.cream }}
