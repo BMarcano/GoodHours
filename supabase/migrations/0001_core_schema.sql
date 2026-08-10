@@ -20,6 +20,9 @@ create policy "profiles_update_own" on public.profiles
 
 grant select, update on public.profiles to authenticated;
 
+-- NOTE: migration 9 replaces this function to also apply comped access on
+-- signup. If you ever re-run this file, re-run 0009 after it or comped
+-- influencers will silently stop being unlocked at signup.
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer set search_path = public as $$
 begin

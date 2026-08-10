@@ -366,6 +366,11 @@ export default function TheGoodHours() {
   const [adminBusy, setAdminBusy] = useState(false);
   const [adminUsers, setAdminUsers] = useState([]); // signups, admin-only
   const [emailsCopied, setEmailsCopied] = useState(false);
+  // --- Admin: comped "unlimited access" grants (influencers, press) ---
+  const [compList, setCompList] = useState([]);
+  const [compEmail, setCompEmail] = useState("");
+  const [compNote, setCompNote] = useState("");
+  const [compResult, setCompResult] = useState(null); // { tone, text } after a grant
   const [buildStep, setBuildStep] = useState(0); // rotating copy while a plan generates
   const [expandedPost, setExpandedPost] = useState(null);
   const [newComment, setNewComment] = useState("");
@@ -537,11 +542,59 @@ export default function TheGoodHours() {
       setTimeout(() => setEmailsCopied(false), 1600);
     });
   }
+  async function loadCompList() {
+    const { data, error: cErr } = await supabase.rpc("admin_comp_list");
+    if (cErr) console.error("admin_comp_list failed:", cErr.message); // e.g. migration 9 not run
+    setCompList(data ?? []);
+  }
+  // Grants by email, registered or not — an influencer's email usually arrives
+  // before they've signed up, and the grant applies itself when they do.
+  async function grantAccess() {
+    const email = compEmail.trim().toLowerCase();
+    if (!email || adminBusy) return;
+    setAdminBusy(true);
+    setCompResult(null);
+    const { data, error: gErr } = await supabase.rpc("admin_grant_access", {
+      p_email: email,
+      p_note: compNote.trim() || null,
+    });
+    setAdminBusy(false);
+    if (gErr) {
+      setCompResult({ tone: "bad", text: "Couldn't grant access — check the email and try again." });
+      return;
+    }
+    if (data?.already_paying) {
+      setCompResult({ tone: "ok", text: `${email} is already a paying member — left their subscription alone.` });
+    } else if (data?.registered) {
+      setCompResult({ tone: "ok", text: `${email} has unlimited access now.` });
+    } else {
+      setCompResult({ tone: "ok", text: `Saved. ${email} hasn't signed up yet — access turns on automatically the moment they do.` });
+    }
+    setCompEmail("");
+    setCompNote("");
+    loadCompList();
+    loadAdminUsers();
+  }
+  async function revokeAccess(email) {
+    if (adminBusy) return;
+    setAdminBusy(true);
+    setCompResult(null);
+    const { error: rErr } = await supabase.rpc("admin_revoke_access", { p_email: email });
+    setAdminBusy(false);
+    if (rErr) {
+      setCompResult({ tone: "bad", text: "Couldn't remove access — try again." });
+      return;
+    }
+    loadCompList();
+    loadAdminUsers();
+  }
   function openAdmin() {
     setShowAdmin(true);
     setSponsorForm(null);
+    setCompResult(null);
     loadAdminSponsors();
     loadAdminUsers();
+    loadCompList();
   }
   function blankSponsor() {
     setSponsorForm({ name: "", neighborhood: "", pitch: "", ages: "", offer_label: "", link_url: "", active: true });
@@ -1671,6 +1724,74 @@ export default function TheGoodHours() {
                     )}
                   </div>
 
+                  {/* Unlimited access — comp an influencer without touching the DB */}
+                  <p className="text-[11px] font-extrabold mt-6 mb-2" style={{ color: C.inkSoft }}>UNLIMITED ACCESS</p>
+                  <div className="rounded-3xl p-4" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
+                    <p className="text-[11px] font-semibold mb-3" style={{ color: C.inkSoft }}>
+                      Give someone full access, free. Works even if they haven't signed up yet — it turns on by itself when they do.
+                    </p>
+                    <input
+                      value={compEmail}
+                      onChange={(e) => setCompEmail(e.target.value)}
+                      placeholder="email@example.com"
+                      type="email"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      className="w-full rounded-xl px-3 py-2.5 text-xs font-bold outline-none border-2 mb-2"
+                      style={{ borderColor: "#F3EBDA", color: C.ink, background: C.cream }}
+                    />
+                    <input
+                      value={compNote}
+                      onChange={(e) => setCompNote(e.target.value)}
+                      placeholder="Note (optional) — e.g. influencer, IG @handle"
+                      className="w-full rounded-xl px-3 py-2.5 text-xs font-bold outline-none border-2 mb-2"
+                      style={{ borderColor: "#F3EBDA", color: C.ink, background: C.cream }}
+                    />
+                    <button
+                      onClick={grantAccess}
+                      disabled={!compEmail.trim() || adminBusy}
+                      className="w-full rounded-xl py-2.5 text-xs font-extrabold transition-all active:scale-[.98]"
+                      style={{ background: C.sage, color: "#fff", opacity: !compEmail.trim() || adminBusy ? 0.5 : 1 }}
+                    >
+                      {adminBusy ? "Working…" : "Give unlimited access"}
+                    </button>
+
+                    {compResult && (
+                      <p
+                        className="text-[11px] font-bold mt-2.5 leading-snug"
+                        style={{ color: compResult.tone === "bad" ? C.terra : C.sage }}
+                      >
+                        {compResult.text}
+                      </p>
+                    )}
+
+                    {compList.length > 0 && (
+                      <div className="space-y-2 mt-4 max-h-60 overflow-y-auto">
+                        {compList.map((c) => (
+                          <div key={c.email} className="flex items-center justify-between gap-2">
+                            <span className="min-w-0">
+                              <span className="text-[11px] font-bold block truncate" style={{ color: C.ink }}>{c.email}</span>
+                              {c.note && (
+                                <span className="text-[10px] font-semibold block truncate" style={{ color: C.inkSoft }}>{c.note}</span>
+                              )}
+                            </span>
+                            <span className="flex items-center gap-1.5 shrink-0">
+                              <Pill tone={c.active ? "sage" : "gold"}>{c.active ? "active" : "waiting for signup"}</Pill>
+                              <button
+                                onClick={() => revokeAccess(c.email)}
+                                disabled={adminBusy}
+                                className="text-[10px] font-extrabold px-2 py-1 rounded-lg"
+                                style={{ background: C.terraSoft, color: C.terra }}
+                              >
+                                Remove
+                              </button>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
                   {/* Signups — admin-only view of who's joined */}
                   <p className="text-[11px] font-extrabold mt-6 mb-2" style={{ color: C.inkSoft }}>SIGNUPS</p>
                   <div className="rounded-3xl p-4" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
@@ -1678,7 +1799,9 @@ export default function TheGoodHours() {
                       <div>
                         <p className="mnn-display text-3xl font-bold leading-none" style={{ color: C.ink }}>{adminUsers.length}</p>
                         <p className="text-[11px] font-bold mt-1" style={{ color: C.sage }}>
-                          {adminUsers.filter((u) => u.is_member).length} paying members
+                          {adminUsers.filter((u) => u.is_member && !u.is_comped).length} paying members
+                          {adminUsers.some((u) => u.is_comped) &&
+                            ` · ${adminUsers.filter((u) => u.is_comped).length} free access`}
                         </p>
                       </div>
                       <button
@@ -1698,7 +1821,11 @@ export default function TheGoodHours() {
                           <div key={u.email} className="flex items-center justify-between gap-2">
                             <span className="text-[11px] font-bold truncate" style={{ color: C.ink }}>{u.email}</span>
                             <span className="flex items-center gap-1.5 shrink-0">
-                              {u.is_member && <Pill tone="sage">paying</Pill>}
+                              {u.is_comped ? (
+                                <Pill tone="gold">free access</Pill>
+                              ) : (
+                                u.is_member && <Pill tone="sage">paying</Pill>
+                              )}
                               <span className="text-[10px] font-bold" style={{ color: C.inkSoft }}>
                                 {new Date(u.created_at).toLocaleDateString()}
                               </span>
