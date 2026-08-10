@@ -87,6 +87,22 @@ function localDateStr(d = new Date()) {
   return `${d.getFullYear()}-${m}-${day}`;
 }
 
+// Noon keeps a bare YYYY-MM-DD from sliding into the neighbouring day when the
+// browser reads it back in local time.
+function weekdayLong(isoDate) {
+  return new Date(isoDate + "T12:00:00").toLocaleDateString("en-US", { weekday: "long" });
+}
+
+// How we refer to the planned day in copy. A plan built for Saturday must never
+// say its events are happening "today" — that's what made a Saturday plan look
+// like it was showing Sunday.
+function dayWord(isoDate) {
+  if (!isoDate) return "today";
+  if (isoDate === localDateStr()) return "today";
+  if (isoDate === localDateStr(new Date(Date.now() + 86400000))) return "tomorrow";
+  return `on ${weekdayLong(isoDate)}`;
+}
+
 // What we tell people while their day is being built. Each line is something
 // that's genuinely happening, and rotating them makes the wait feel shorter.
 const BUILD_STEPS = [
@@ -1194,7 +1210,7 @@ export default function TheGoodHours() {
                   />
                 </div>
                 <p className="text-[11px] mt-2 font-semibold" style={{ color: C.inkSoft }}>
-                  {new Date(planDate + "T12:00:00").toLocaleDateString("en-US", { weekday: "long" })} plans are different — story times are weekday things, museums fill up on weekends. We factor it in.
+                  {weekdayLong(planDate)} plans are different — story times are weekday things, museums fill up on weekends. We factor it in.
                 </p>
               </section>
 
@@ -1283,7 +1299,7 @@ export default function TheGoodHours() {
                     <div className="fade-up rounded-2xl px-4 py-3 flex items-center gap-2" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
                       <span className="w-2 h-2 rounded-full animate-ping" style={{ background: C.terra }} />
                       <p className="text-xs font-bold" style={{ color: C.inkSoft }}>
-                        Checking what's actually on in {plan.location} today — live search, ~30 seconds…
+                        Checking what's actually on in {plan.location} {dayWord(plan.planDate)} — live search, ~30 seconds…
                       </p>
                     </div>
                   )}
@@ -1291,7 +1307,7 @@ export default function TheGoodHours() {
                   {eventsPlanId === plan.id && events && events.local?.length > 0 && (
                     <div className="fade-up">
                       <p className="text-xs font-extrabold px-1 mb-2 flex items-center gap-1.5" style={{ color: C.ink }}>
-                        <Calendar size={13} style={{ color: C.terra }} /> Happening today near you
+                        <Calendar size={13} style={{ color: C.terra }} /> Happening {dayWord(plan.planDate)} near you
                       </p>
                       <div className="space-y-2">
                         {events.local.map((ev, i) => (

@@ -7,6 +7,8 @@
 // can_generate_plan() (service role RPC) allows subscribers, or atomically
 // consumes the single free preview, or returns 402.
 
+import { dayLabel as buildDayLabel, weekdayName, isValidPlanDate } from "./_date.js";
+
 async function getUserFromRequest(req) {
   const supaUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
   const anonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
@@ -31,7 +33,7 @@ export default async function handler(req, res) {
 
     const cleanAges = ages.filter((a) => String(a || "").trim());
     const cleanSlots = slots.filter((s) => s && s.from && s.to);
-    if (!cleanAges.length || !cleanSlots.length || !location.trim() || !planDate) {
+    if (!cleanAges.length || !cleanSlots.length || !location.trim() || !isValidPlanDate(planDate)) {
       res.status(400).json({ error: "Missing inputs" });
       return;
     }
@@ -69,13 +71,8 @@ export default async function handler(req, res) {
     }
 
     // Day-of-week context: the model has no clock, we must tell it the date
-    const dateObj = new Date(planDate + "T12:00:00");
-    const dayLabel = dateObj.toLocaleDateString("en-US", {
-      weekday: "long",
-      month: "long",
-      day: "numeric",
-      year: "numeric",
-    });
+    const dayLabel = buildDayLabel(planDate);
+    const weekday = weekdayName(planDate);
 
     const prompt = `You are the planning engine for "The Good Hours", an app that builds structured daily plans for parents and caregivers of young kids.
 
@@ -85,7 +82,10 @@ Inputs:
 - Neighborhood/location: ${location}
 - This plan is for: ${dayLabel}
 
-IMPORTANT \u2014 use the day of week: library story times and drop-in classes are typically WEEKDAY programs; many museums close Mondays; weekends mean bigger crowds (suggest arriving at open); account for holidays if the date is one. Never suggest an activity that is unlikely to run on this specific day.
+IMPORTANT \u2014 this plan is for ${weekday} and ONLY ${weekday}:
+- Library story times and drop-in classes are typically WEEKDAY programs; many museums close Mondays; weekends mean bigger crowds (suggest arriving at open); account for holidays if the date is one. Never suggest an activity that is unlikely to run on ${weekday}.
+- Never name a different day of the week anywhere in your output. No "Sunday market", no "great on Fridays", no "come back Saturday". If something only runs on another day, it does not belong in this plan.
+- Wherever the day matters to the suggestion, say "${weekday}" explicitly so the caregiver can tell you accounted for it.
 
 Create a structured daily plan. For each time slot, give 1-2 activities. Where possible, suggest REAL types of venues/events that plausibly exist near that location (libraries, parks, story times, open plays, museums, splash pads) \u2014 the kind of thing a parent would find via a public search. Mix free and paid. Account for the ages given (nap windows for under-2s, energy burn for 3-5s). At least one block must include a small win for the grown-up too (good coffee nearby, a bench with a view, a calm moment) \u2014 mention it in the 'why'.
 
