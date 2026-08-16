@@ -3,6 +3,36 @@ import { Sun, MapPin, Clock, Heart, Users, Bookmark, Globe, MessageCircle, Spark
 import { supabase } from "./supabaseClient";
 import { initPixel, initGoogleTag, trackPixel, trackGa } from "./pixel";
 
+// Snapshot of the URL hash at boot. Auth links (password reset) land with
+// their state here, and the auth library consumes/cleans the hash asynchronously
+// — so we grab a copy before anyone touches it.
+const BOOT_HASH = typeof window !== "undefined" ? window.location.hash : "";
+const BOOT_HASH_PARAMS = new URLSearchParams(BOOT_HASH.replace(/^#/, ""));
+
+// "A password reset is in progress" survives reloads (the library scrubs the
+// hash after consuming it, so React state alone loses the recovery screen if
+// iOS evicts and reloads the webview mid-flow).
+const RECOVERY_PENDING_KEY = "gh_recovery_pending";
+function setRecoveryPending() { try { sessionStorage.setItem(RECOVERY_PENDING_KEY, "1"); } catch (e) { /* private mode */ } }
+function clearRecoveryPending() { try { sessionStorage.removeItem(RECOVERY_PENDING_KEY); } catch (e) { /* private mode */ } }
+function hasRecoveryPending() { try { return sessionStorage.getItem(RECOVERY_PENDING_KEY) === "1"; } catch (e) { return false; } }
+
+// The user id ("sub") inside the reset link's token, decoded locally. Guards
+// against changing the WRONG account's password on a shared device: if the
+// link's tokens failed to apply but another account's session survived, the
+// active session won't match the link's sub.
+function bootRecoveryUserId() {
+  try {
+    const tok = BOOT_HASH_PARAMS.get("access_token");
+    if (!tok) return null;
+    const b64 = tok.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+    return JSON.parse(atob(padded)).sub || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // ------------------------------------------------------------------
 // THE GOOD HOURS — MVP
 // Screens: Plan Builder → Generated Plan → My Plans → Community
@@ -428,15 +458,57 @@ export default function TheGoodHours() {
 
   // Session bootstrap: restore on load, then follow sign-in/sign-out events
   useEffect(() => {
+    // Email links (password reset, signup confirmation) land with their outcome
+    // in the URL hash. Handle every outcome explicitly — otherwise an expired
+    // link silently dumps people on the signup screen with no explanation
+    // (exactly the bug Ashley hit).
+    let bootLinkFailed = false;
+    if (BOOT_HASH_PARAMS.get("error") || BOOT_HASH_PARAMS.get("error_code")) {
+      // Wording is deliberately link-agnostic: the error hash carries no type,
+      // so this same landing covers expired reset AND confirmation links.
+      bootLinkFailed = true;
+      clearRecoveryPending();
+      setAuthMode("signin");
+      setAuthError(
+        BOOT_HASH_PARAMS.get("error_code") === "otp_expired"
+          ? 'That link expired or was already used — type your email and tap "Forgot password?" for a fresh one.'
+          : 'That link didn\'t work — type your email and tap "Forgot password?" for a fresh one.'
+      );
+      // scrub the error from the URL so a refresh doesn't re-show it
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    } else if (BOOT_HASH_PARAMS.get("type") === "recovery") {
+      // valid reset link: the library is parsing the tokens; show the
+      // new-password screen even if its PASSWORD_RECOVERY event fired before
+      // our listener attached
+      setRecoveryPending();
+      setRecoveryMode(true);
+    } else if (hasRecoveryPending()) {
+      // the page reloaded mid-reset (the library scrubs the hash after
+      // consuming it) — put the new-password screen back
+      setRecoveryMode(true);
+    }
     supabase.auth.getSession().then(({ data }) => {
       setSession(data.session);
+      if (data.session && bootLinkFailed) {
+        // a signed-in user clicked a dead link: the login screen (the only
+        // place authError renders) will never show — surface it in the app
+        setError('That password link expired. You\'re still signed in — to change your password, sign out and tap "Forgot password?".');
+      }
       setAuthLoading(false);
     });
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, newSession) => {
       // arriving from a "reset password" email: show the set-a-new-password screen
       if (event === "PASSWORD_RECOVERY") setRecoveryMode(true);
+      // INITIAL_SESSION fires once for EVERY new subscriber — with a null
+      // session for signed-out visitors. It is NOT a sign-out: bailing here
+      // keeps it from wiping the boot-time state above (the reset-link error
+      // message, recovery mode). The wipe below is strictly for real sign-outs.
+      if (event === "INITIAL_SESSION") {
+        setSession(newSession);
+        return;
+      }
       setSession(newSession);
-      if (!newSession) {
+      if (event === "SIGNED_OUT") {
         // signed out — wipe per-user state; login screen renders while session is null
         setAuthStep("paywall");
         setPreviewMode(false);
@@ -450,6 +522,7 @@ export default function TheGoodHours() {
         setAuthError("");
         setAuthNotice("");
         setRecoveryMode(false);
+        clearRecoveryPending();
         setNewPassword("");
         setIsMember(false);
         setFreePlansUsed(0);
@@ -691,16 +764,47 @@ export default function TheGoodHours() {
 
   async function handleSetNewPassword() {
     if (newPassword.length < 6 || authBusy) return;
+    // Shared-device guard: if the reset link's tokens failed to apply but a
+    // DIFFERENT account was already signed in here, updateUser would silently
+    // change that other account's password. The link's token says which user
+    // it was for — bail on a mismatch.
+    const expectedUser = bootRecoveryUserId();
+    if (expectedUser && session?.user?.id && session.user.id !== expectedUser) {
+      setRecoveryMode(false);
+      clearRecoveryPending();
+      setNewPassword("");
+      setAuthMode("signin");
+      setAuthError('That reset link couldn\'t be applied on this device — type your email and tap "Forgot password?" for a fresh one.');
+      return;
+    }
     setAuthBusy(true);
     setAuthError("");
     const { error: uErr } = await supabase.auth.updateUser({ password: newPassword });
     setAuthBusy(false);
     if (uErr) {
-      setAuthError("Couldn't update your password — try again.");
+      if (/session/i.test(uErr.message || "")) {
+        // the reset link didn't produce a session (expired mid-flight) — send
+        // them back to request a fresh one instead of a dead-end error
+        setRecoveryMode(false);
+        clearRecoveryPending();
+        setNewPassword("");
+        setAuthMode("signin");
+        setAuthError('That reset link expired — type your email and tap "Forgot password?" for a fresh one.');
+      } else {
+        setAuthError("Couldn't update your password — try again.");
+      }
     } else {
       setRecoveryMode(false);
+      clearRecoveryPending();
       setNewPassword("");
     }
+  }
+
+  function handleSkipRecovery() {
+    setRecoveryMode(false);
+    clearRecoveryPending();
+    setNewPassword("");
+    setAuthError("");
   }
 
   function handleSignOut() {
@@ -894,6 +998,9 @@ export default function TheGoodHours() {
             <p className="text-[11px] font-bold text-center mt-3" style={{ color: authError ? C.terra : C.inkSoft }}>
               {authError || "At least 6 characters."}
             </p>
+            <button onClick={handleSkipRecovery} className="mt-3 w-full py-2 text-[11px] font-extrabold text-center" style={{ color: C.inkSoft }}>
+              skip — keep my current password
+            </button>
           </div>
         </div>
       </div>
