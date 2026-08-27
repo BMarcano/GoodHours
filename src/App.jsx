@@ -137,8 +137,9 @@ function dayWord(isoDate) {
 // that's genuinely happening, and rotating them makes the wait feel shorter.
 const BUILD_STEPS = [
   "Reading your kids' ages…",
+  "Checking the forecast…",
   "Scouting spots near you…",
-  "Checking what's actually open today…",
+  "Checking what's open that day…",
   "Working around nap windows…",
   "Finding a coffee stop for the grown-up…",
   "Putting your day in order…",
@@ -292,14 +293,14 @@ async function generatePlan({ ages, slots, location, planDate }, accessToken) {
 // ---------- Live events (server-side web search; fires after the plan) ----------
 // Two focused requests (kind: "local" | "trip") run in parallel — each stays
 // under Vercel's function time limit and paints its section as it lands.
-async function fetchTodaysEvents({ location, planDate, ages, kind }, accessToken) {
+async function fetchTodaysEvents({ location, planDate, ages, kind, weather }, accessToken) {
   const res = await fetch("/api/fetch-events", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     },
-    body: JSON.stringify({ location, planDate, ages, kind }),
+    body: JSON.stringify({ location, planDate, ages, kind, weather }),
   });
   if (!res.ok) throw new Error("Events search failed");
   return await res.json();
@@ -316,6 +317,7 @@ function dbPlanToUi(row) {
     ages: row.ages ?? [],
     blocks: row.blocks ?? [],
     proTip: row.pro_tip,
+    weather: row.weather_context ?? null,
     isPublic: row.is_public,
     savedAt: new Date(row.created_at).toLocaleDateString(),
   };
@@ -333,6 +335,54 @@ function Pill({ children, tone = "sage" }) {
     <span style={{ background: t.bg, color: t.fg }} className="px-2.5 py-1 rounded-full text-xs font-bold">
       {children}
     </span>
+  );
+}
+
+function WeatherCard({ weather }) {
+  if (!weather) return null;
+
+  if (!weather.available) {
+    return (
+      <div className="fade-up rounded-3xl p-4 flex gap-3 items-start" style={{ background: C.card, border: "2px solid #F3EBDA", boxShadow: "0 2px 12px rgba(46,41,78,.05)" }}>
+        <span className="text-2xl leading-none" aria-hidden="true">🌤️</span>
+        <div>
+          <p className="text-xs font-extrabold" style={{ color: C.ink }}>Forecast pending</p>
+          <p className="text-xs font-semibold mt-1 leading-relaxed" style={{ color: C.inkSoft }}>{weather.reason}</p>
+        </div>
+      </div>
+    );
+  }
+
+  const modeLabel = weather.mode === "indoor" ? "Indoor day" : weather.mode === "flexible" ? "Flexible plan" : "Outdoor friendly";
+  const tone = weather.mode === "indoor" ? "terra" : weather.mode === "flexible" ? "gold" : "sage";
+  const emoji = { snow: "❄️", storm: "⛈️", rain: "🌧️", cold: "🧣", hot: "☀️", sun: "☀️", cloud: "⛅" }[weather.icon] || "🌤️";
+  const border = weather.mode === "indoor" ? C.terra : weather.mode === "flexible" ? C.gold : C.sage;
+
+  return (
+    <div className="fade-up rounded-3xl p-5" style={{ background: C.card, border: `3px solid ${border}`, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
+      <div className="flex items-start gap-3">
+        <div className="w-12 h-12 shrink-0 rounded-2xl flex items-center justify-center text-2xl" style={{ background: weather.mode === "indoor" ? C.terraSoft : weather.mode === "flexible" ? C.goldSoft : C.sageSoft }} aria-hidden="true">
+          {emoji}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div>
+              <p className="text-[10px] font-extrabold uppercase tracking-wide" style={{ color: C.inkSoft }}>Weather-aware plan</p>
+              <p className="font-extrabold" style={{ color: C.ink }}>{weather.condition}</p>
+            </div>
+            <Pill tone={tone}>{modeLabel}</Pill>
+          </div>
+          <p className="text-xs font-extrabold mt-2" style={{ color: C.ink }}>
+            {weather.temperatureMin}–{weather.temperatureMax}°F · {weather.precipitationProbability}% chance of precipitation
+          </p>
+          <p className="text-xs font-semibold mt-1.5 leading-relaxed" style={{ color: C.inkSoft }}>{weather.reason}</p>
+          <p className="text-[10px] font-semibold mt-2" style={{ color: C.inkSoft }}>
+            Forecast for {weather.resolvedLocation || "your area"} ·{" "}
+            <a href={weather.sourceUrl} target="_blank" rel="noopener noreferrer" className="underline">{weather.source}</a>
+          </p>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -838,10 +888,10 @@ export default function TheGoodHours() {
       const mergeEvents = (partial) =>
         setEvents((prev) => ({ local: [], worthTheTrip: [], ...(prev || {}), ...partial }));
       Promise.allSettled([
-        fetchTodaysEvents({ location, planDate, ages, kind: "local" }, token)
+        fetchTodaysEvents({ location, planDate, ages, kind: "local", weather: p.weather }, token)
           .then(mergeEvents)
           .catch(() => mergeEvents({ local: [] })),
-        fetchTodaysEvents({ location, planDate, ages, kind: "trip" }, token)
+        fetchTodaysEvents({ location, planDate, ages, kind: "trip", weather: p.weather }, token)
           .then(mergeEvents)
           .catch(() => mergeEvents({ worthTheTrip: [] })),
       ]).then(() => setEventsLoading(false));
@@ -889,11 +939,19 @@ export default function TheGoodHours() {
       ages: plan.ages,
       blocks: plan.blocks,
       pro_tip: plan.proTip,
+      weather_context: plan.weather ?? null,
       is_public: makePublic,
     };
     // freshly generated plans carry a Date.now() numeric id — omit it so Postgres mints the uuid
     if (typeof plan.id === "string" && plan.id.length === 36) payload.id = plan.id;
-    const { data, error: saveError } = await supabase.from("plans").upsert(payload).select().single();
+    let { data, error: saveError } = await supabase.from("plans").upsert(payload).select().single();
+    // Rolling-deploy safety: if the frontend lands just before migration 0010,
+    // saving still works; the weather snapshot begins persisting once the new
+    // column is visible in Supabase's schema cache.
+    if (saveError && /weather_context/i.test(saveError.message || "")) {
+      const { weather_context: _weatherContext, ...legacyPayload } = payload;
+      ({ data, error: saveError } = await supabase.from("plans").upsert(legacyPayload).select().single());
+    }
     setSaving(false);
     if (saveError || !data) {
       setError("Couldn't save your plan — try again in a moment.");
@@ -1419,6 +1477,8 @@ export default function TheGoodHours() {
                     <h2 className="mnn-display text-2xl font-bold mt-2" style={{ color: C.cream }}>{plan.title}</h2>
                     <p className="text-sm mt-1 font-semibold" style={{ color: "#B8B3D1" }}>{plan.summary}</p>
                   </div>
+
+                  <WeatherCard weather={plan.weather} />
 
                   <div className="space-y-3">
                     {plan.blocks?.map((b, i) => (

@@ -8,6 +8,7 @@
 // consumes the single free preview, or returns 402.
 
 import { dayLabel as buildDayLabel, weekdayName, isValidPlanDate } from "./_date.js";
+import { getWeatherForPlan, weatherPlanningInstructions } from "./_weather.js";
 
 async function getUserFromRequest(req) {
   const supaUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
@@ -73,6 +74,10 @@ export default async function handler(req, res) {
     // Day-of-week context: the model has no clock, we must tell it the date
     const dayLabel = buildDayLabel(planDate);
     const weekday = weekdayName(planDate);
+    // Weather is a bonus, never a blocker: the helper returns a structured
+    // unavailable state on geocoding, horizon, timeout, or provider errors.
+    const weather = await getWeatherForPlan({ location, planDate });
+    const weatherInstructions = weatherPlanningInstructions(weather);
 
     const prompt = `You are the planning engine for "The Good Hours", an app that builds structured daily plans for parents and caregivers of young kids.
 
@@ -81,6 +86,8 @@ Inputs:
 - Time slots to fill: ${cleanSlots.map((s) => `${s.from}\u2013${s.to}`).join("; ")}
 - Neighborhood/location: ${location}
 - This plan is for: ${dayLabel}
+
+${weatherInstructions}
 
 IMPORTANT \u2014 this plan is for ${weekday} and ONLY ${weekday}:
 - Library story times and drop-in classes are typically WEEKDAY programs; many museums close Mondays; weekends mean bigger crowds (suggest arriving at open); account for holidays if the date is one. Never suggest an activity that is unlikely to run on ${weekday}.
@@ -136,7 +143,9 @@ Respond ONLY with valid JSON, no markdown fences, in this shape:
       return;
     }
 
-    res.status(200).json(plan);
+    // The forecast snapshot is deterministic server data. Override anything
+    // the model may have tried to add under the same property.
+    res.status(200).json({ ...plan, weather });
   } catch (e) {
     console.error("generate-plan error:", e);
     res.status(500).json({ error: "Server error" });

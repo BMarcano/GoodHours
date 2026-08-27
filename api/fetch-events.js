@@ -59,9 +59,21 @@ async function runEventsSearch(prompt, toolType, maxUses) {
   return { ok: true, data };
 }
 
-function buildPrompt({ kind, location, dayLabel, isoDate, ages }) {
+function weatherRule(weather) {
+  const mode = ["indoor", "flexible", "outdoor"].includes(weather?.mode) ? weather.mode : null;
+  if (mode === "indoor") {
+    return `WEATHER FIT IS REQUIRED: The generated day is in INDOOR mode because of the forecast. Return only events whose main experience is inside a weather-protected venue. Exclude street fairs, outdoor markets, parks, playgrounds, outdoor festivals, and exposed stadium events.`;
+  }
+  if (mode === "flexible") {
+    return `WEATHER FIT: Conditions are borderline. Strongly prefer indoor events; include an outdoor event only when its listing identifies a practical indoor or covered fallback.`;
+  }
+  return "";
+}
+
+function buildPrompt({ kind, location, dayLabel, isoDate, ages, weather }) {
   const searchBudget = kind === "trip" ? "Use ONE web search" : "Use at most 2 web searches";
   const intro = `You help caregivers find REAL kid-friendly happenings. Search the web for events happening on ${dayLabel} relevant to a caregiver in ${location} with kids aged ${ages.join(", ")}. ${searchBudget}, then answer.`;
+  const weatherFit = weatherRule(weather);
 
   // Spelled out every time because this is the one thing the search results
   // actively push the model to get wrong.
@@ -77,6 +89,8 @@ function buildPrompt({ kind, location, dayLabel, isoDate, ages }) {
 
 Find 2-3 special events that day across the wider city/region that justify a subway or car ride — kids' shows, museum special exhibits, family sports games with cheap tickets, big seasonal events. Include ticket price if findable.
 
+${weatherFit}
+
 ${dateRule}
 
 The "time" field is clock times only ("2–7 PM", "All day") — never a weekday. The "cost" field must be 1-4 words MAX ("Free", "$30", "Free w/ registration") — details belong in "whyWorth" or "transitNote", never in cost.
@@ -88,6 +102,8 @@ Respond ONLY with JSON, no markdown fences, no other text:
   return `${intro}
 
 Find events/happenings that day in or very near ${location} — street fairs, festivals, library specials, pop-ups, farmers markets with kid appeal. For each, add ONE practical caregiver note (crowds, arrive early, stroller access, nap-timing).
+
+${weatherFit}
 
 ${dateRule}
 
@@ -137,7 +153,7 @@ export default async function handler(req, res) {
       return;
     }
 
-    const { location = "", planDate = "", ages = [], kind = "local" } = req.body || {};
+    const { location = "", planDate = "", ages = [], kind = "local", weather = null } = req.body || {};
     const cleanAges = ages.filter((a) => String(a || "").trim());
     if (!location.trim() || !isValidPlanDate(planDate)) {
       res.status(400).json({ error: "Missing inputs" });
@@ -146,7 +162,7 @@ export default async function handler(req, res) {
 
     const dayLabel = buildDayLabel(planDate);
 
-    const prompt = buildPrompt({ kind, location, dayLabel, isoDate: planDate, ages: cleanAges });
+    const prompt = buildPrompt({ kind, location, dayLabel, isoDate: planDate, ages: cleanAges, weather });
     const maxUses = kind === "trip" ? 1 : 2;
 
     let result = await runEventsSearch(prompt, SEARCH_TOOL_VERSIONS[0], maxUses);
