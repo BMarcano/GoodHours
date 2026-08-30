@@ -9,7 +9,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   </React.StrictMode>,
 )
 
-// Hand off from the instant HTML splash to React's (identical) one
+// Hand off from the instant HTML photo splash to React's matching one.
 const boot = document.getElementById('boot-splash')
 if (boot) {
   boot.style.opacity = '0'

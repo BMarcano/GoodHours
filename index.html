@@ -5,8 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/favicon.svg" />
-    <meta name="theme-color" content="#FFF9EC" />
+    <meta name="theme-color" content="#2E294E" />
     <title>The Good Hours</title>
+    <link rel="preload" as="image" href="/splash/family-chalk.jpg" fetchpriority="high" />
 
     <!-- Start the fonts downloading in parallel with the JS bundle -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -22,56 +23,77 @@
       main.jsx fades it out once React has mounted its own (identical) splash.
     -->
     <style>
-      html, body { margin: 0; background: #FFF9EC; }
-      #boot-splash {
-        position: fixed; inset: 0; z-index: 9999;
-        background: #FFF9EC;
-        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 24px;
-        transition: opacity .35s ease;
+      html, body { margin: 0; background: #2E294E; }
+      #boot-splash { position: fixed; inset: 0; z-index: 9999; overflow: hidden; background: #2E294E; transition: opacity .35s ease; }
+      #boot-splash .scene {
+        position: absolute; inset: -2px; width: calc(100% + 4px); height: calc(100% + 4px);
+        object-fit: cover; object-position: center; opacity: 0;
+        transform: scale(1.015); animation: bootScene 4.8s ease-in-out infinite;
       }
+      #boot-splash .scene:nth-child(2) { animation-delay: 1.6s; }
+      #boot-splash .scene:nth-child(3) { animation-delay: 3.2s; }
+      #boot-splash .shade { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(22,18,43,.68) 0%, rgba(22,18,43,.14) 42%, rgba(22,18,43,.76) 100%); }
+      #boot-splash .content {
+        position: relative; z-index: 2; min-height: 100%; box-sizing: border-box;
+        display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+        padding: max(42px, calc(env(safe-area-inset-top) + 24px)) 26px max(34px, calc(env(safe-area-inset-bottom) + 22px));
+        text-align: center; color: #fff;
+      }
+      #boot-splash .brand { display: flex; flex-direction: column; align-items: center; }
+      #boot-splash .sun-wrap { width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; background: rgba(255,249,236,.94); box-shadow: 0 8px 28px rgba(20,16,42,.24); }
+      #boot-splash .sun-wrap svg { animation: bootBob 3.2s ease-in-out infinite; transform-origin: center; }
       #boot-splash .word {
-        font-family: 'Baloo 2', 'Trebuchet MS', sans-serif;
-        font-size: 36px; font-weight: 800; color: #2E294E; letter-spacing: -.01em;
+        margin-top: 14px; font-family: 'Baloo 2', 'Trebuchet MS', sans-serif;
+        font-size: clamp(36px, 10vw, 46px); line-height: 1; font-weight: 800; color: #fff; letter-spacing: -.02em;
+        text-shadow: 0 2px 18px rgba(20,16,42,.42);
       }
-      #boot-splash .good {
-        background: #FF5D8F; color: #fff; padding: 1px 9px; border-radius: 9px;
-        box-shadow: 2px 2px 0 #2E294E; display: inline-block;
-        animation: bootWiggle 2.6s ease-in-out infinite;
-      }
-      #boot-splash .dots { display: flex; gap: 8px; }
-      #boot-splash .dots i {
-        width: 9px; height: 9px; border-radius: 50%; display: block;
-        animation: bootBounce 1.1s ease-in-out infinite;
-      }
-      #boot-splash svg { animation: bootBob 3.2s ease-in-out infinite; transform-origin: center; }
+      #boot-splash .good { background: #FF5D8F; color: #fff; padding: 1px 9px; border-radius: 9px; box-shadow: 2px 2px 0 rgba(46,41,78,.9); display: inline-block; animation: bootWiggle 2.6s ease-in-out infinite; }
+      #boot-splash .footer { width: min(100%, 360px); }
+      #boot-splash .promise { margin: 0 0 18px; font: 800 19px/1.25 'Nunito', sans-serif; text-shadow: 0 2px 14px rgba(20,16,42,.45); }
+      #boot-splash .loading { display: flex; align-items: center; gap: 12px; }
+      #boot-splash .loading span { flex: 0 0 auto; font: 800 10px/1 'Nunito', sans-serif; letter-spacing: .12em; text-transform: uppercase; color: rgba(255,255,255,.84); }
+      #boot-splash .track { flex: 1; height: 5px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.3); backdrop-filter: blur(6px); }
+      #boot-splash .track i { display: block; width: 42%; height: 100%; border-radius: inherit; background: #FFB627; animation: bootProgress 1.55s ease-in-out infinite; }
+      @keyframes bootScene { 0%,28% { opacity: 1; transform: scale(1.015); } 36%,92% { opacity: 0; transform: scale(1.055); } 100% { opacity: 1; transform: scale(1.015); } }
       @keyframes bootBob { 0%,100% { transform: translateY(0) rotate(-6deg); } 50% { transform: translateY(-4px) rotate(2deg); } }
       @keyframes bootWiggle { 0%,100% { transform: rotate(-4deg); } 50% { transform: rotate(-1deg); } }
-      @keyframes bootBounce { 0%,80%,100% { transform: translateY(0); opacity: .4; } 40% { transform: translateY(-7px); opacity: 1; } }
+      @keyframes bootProgress { 0% { transform: translateX(-110%); } 100% { transform: translateX(250%); } }
       @media (prefers-reduced-motion: reduce) {
-        #boot-splash svg, #boot-splash .good, #boot-splash .dots i { animation: none; }
+        #boot-splash .scene { display: none; animation: none; }
+        #boot-splash .scene:first-child { display: block; opacity: 1; transform: none; }
+        #boot-splash .sun-wrap svg, #boot-splash .good, #boot-splash .track i { animation: none; }
       }
     </style>
   </head>
   <body>
     <div id="boot-splash">
-      <svg width="96" height="96" viewBox="0 0 64 64" aria-hidden="true">
-        <g stroke="#FFB627" stroke-width="5" stroke-linecap="round">
-          <line x1="56" y1="32" x2="62" y2="32" /><line x1="48.97" y1="48.97" x2="53.21" y2="53.21" />
-          <line x1="32" y1="56" x2="32" y2="62" /><line x1="15.03" y1="48.97" x2="10.79" y2="53.21" />
-          <line x1="8" y1="32" x2="2" y2="32" /><line x1="15.03" y1="15.03" x2="10.79" y2="10.79" />
-          <line x1="32" y1="8" x2="32" y2="2" /><line x1="48.97" y1="15.03" x2="53.21" y2="10.79" />
-        </g>
-        <circle cx="32" cy="32" r="19" fill="#FFB627" />
-        <circle cx="32" cy="32" r="19" fill="none" stroke="#2E294E" stroke-width="2.5" />
-        <circle cx="25.5" cy="29" r="2.6" fill="#2E294E" /><circle cx="38.5" cy="29" r="2.6" fill="#2E294E" />
-        <circle cx="22" cy="35.5" r="3.2" fill="#FF5D8F" opacity=".55" /><circle cx="42" cy="35.5" r="3.2" fill="#FF5D8F" opacity=".55" />
-        <path d="M24 36.5 Q32 44.5 40 36.5" fill="none" stroke="#2E294E" stroke-width="2.8" stroke-linecap="round" />
-      </svg>
-      <div class="word">the <span class="good">good</span> hours</div>
-      <div class="dots">
-        <i style="background:#FF5D8F"></i>
-        <i style="background:#FFB627; animation-delay:.15s"></i>
-        <i style="background:#17C3B2; animation-delay:.3s"></i>
+      <img class="scene" src="/splash/family-chalk.jpg" alt="" fetchpriority="high" />
+      <img class="scene" src="/splash/family-museum.jpg" alt="" />
+      <img class="scene" src="/splash/family-baking.jpg" alt="" />
+      <div class="shade"></div>
+      <div class="content">
+        <div class="brand">
+          <div class="sun-wrap">
+            <svg width="48" height="48" viewBox="0 0 64 64" aria-hidden="true">
+              <g stroke="#FFB627" stroke-width="5" stroke-linecap="round">
+                <line x1="56" y1="32" x2="62" y2="32" /><line x1="48.97" y1="48.97" x2="53.21" y2="53.21" />
+                <line x1="32" y1="56" x2="32" y2="62" /><line x1="15.03" y1="48.97" x2="10.79" y2="53.21" />
+                <line x1="8" y1="32" x2="2" y2="32" /><line x1="15.03" y1="15.03" x2="10.79" y2="10.79" />
+                <line x1="32" y1="8" x2="32" y2="2" /><line x1="48.97" y1="15.03" x2="53.21" y2="10.79" />
+              </g>
+              <circle cx="32" cy="32" r="19" fill="#FFB627" />
+              <circle cx="32" cy="32" r="19" fill="none" stroke="#2E294E" stroke-width="2.5" />
+              <circle cx="25.5" cy="29" r="2.6" fill="#2E294E" /><circle cx="38.5" cy="29" r="2.6" fill="#2E294E" />
+              <circle cx="22" cy="35.5" r="3.2" fill="#FF5D8F" opacity=".55" /><circle cx="42" cy="35.5" r="3.2" fill="#FF5D8F" opacity=".55" />
+              <path d="M24 36.5 Q32 44.5 40 36.5" fill="none" stroke="#2E294E" stroke-width="2.8" stroke-linecap="round" />
+            </svg>
+          </div>
+          <div class="word">the <span class="good">good</span> hours</div>
+        </div>
+        <div class="footer">
+          <p class="promise">Making the little hours shine.</p>
+          <div class="loading"><span>Finding your day</span><div class="track"><i></i></div></div>
+        </div>
       </div>
     </div>
     <div id="root"></div>

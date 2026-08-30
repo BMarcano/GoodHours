@@ -62,8 +62,16 @@ const FONT_LINK = (
     .build-bar > span { position: absolute; top: 0; bottom: 0; width: 45%; border-radius: 999px; animation: barSlide 1.5s ease-in-out infinite; }
     @keyframes msgIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
     .build-msg { animation: msgIn .4s ease both; }
+    @keyframes splashScene { 0%,28% { opacity: 1; transform: scale(1.015); } 36%,92% { opacity: 0; transform: scale(1.055); } 100% { opacity: 1; transform: scale(1.015); } }
+    .gh-splash-scene { opacity: 0; transform: scale(1.015); animation: splashScene 4.8s ease-in-out infinite; }
+    .gh-splash-scene:nth-child(2) { animation-delay: 1.6s; }
+    .gh-splash-scene:nth-child(3) { animation-delay: 3.2s; }
+    @keyframes splashProgress { 0% { transform: translateX(-110%); } 100% { transform: translateX(250%); } }
+    .gh-splash-progress { animation: splashProgress 1.55s ease-in-out infinite; }
     @media (prefers-reduced-motion: reduce) {
-      .logo-bob, .sticker-wiggle, .splash-dot, .fade-up { animation: none; }
+      .logo-bob, .sticker-wiggle, .splash-dot, .fade-up, .gh-splash-progress { animation: none; }
+      .gh-splash-scene { display: none; animation: none; }
+      .gh-splash-scene:first-child { display: block; opacity: 1; transform: none; }
     }
   `}</style>
 );
@@ -148,20 +156,49 @@ const BUILD_STEPS = [
 // ---------- Splash: shown while the session and the user's data load ----------
 function SplashScreen() {
   return (
-    <div className="mnn-root min-h-screen w-full flex flex-col items-center justify-center gap-6" style={{ background: C.cream }}>
+    <div className="mnn-root fixed inset-0 overflow-hidden" style={{ background: C.ink }} role="status" aria-label="The Good Hours is loading">
       {FONT_LINK}
-      <div className="fade-up"><MnnLogo size={96} /></div>
-      <h1 className="mnn-display text-4xl font-bold text-center leading-none tracking-tight fade-up fade-up-1" style={{ color: C.ink }}>
-        the
-        <span className="sticker-wiggle mx-1.5 px-2 rounded-lg" style={{ background: C.terra, color: "#fff", boxShadow: "2px 2px 0 #2E294E" }}>
-          good
-        </span>
-        hours
-      </h1>
-      <div className="flex gap-2 fade-up fade-up-2">
-        <span className="splash-dot" style={{ background: C.terra }} />
-        <span className="splash-dot" style={{ background: C.gold, animationDelay: ".15s" }} />
-        <span className="splash-dot" style={{ background: C.sage, animationDelay: ".3s" }} />
+      <div className="absolute inset-0" aria-hidden="true">
+        {["family-chalk.jpg", "family-museum.jpg", "family-baking.jpg"].map((name, i) => (
+          <img
+            key={name}
+            src={`/splash/${name}`}
+            alt=""
+            loading="eager"
+            fetchpriority={i === 0 ? "high" : "auto"}
+            decoding="async"
+            className="gh-splash-scene absolute -inset-0.5 w-[calc(100%+4px)] h-[calc(100%+4px)] object-cover object-center"
+          />
+        ))}
+      </div>
+      <div className="absolute inset-0" style={{ background: "linear-gradient(180deg, rgba(22,18,43,.68) 0%, rgba(22,18,43,.14) 42%, rgba(22,18,43,.76) 100%)" }} />
+      <div
+        className="relative z-10 min-h-full flex flex-col items-center justify-between px-6 text-center"
+        style={{ paddingTop: "max(42px, calc(env(safe-area-inset-top) + 24px))", paddingBottom: "max(34px, calc(env(safe-area-inset-bottom) + 22px))" }}
+      >
+        <div className="flex flex-col items-center fade-up">
+          <div className="w-16 h-16 rounded-full flex items-center justify-center" style={{ background: "rgba(255,249,236,.94)", boxShadow: "0 8px 28px rgba(20,16,42,.24)" }}>
+            <MnnLogo size={48} />
+          </div>
+          <h1 className="mnn-display font-bold mt-3.5 text-center leading-none tracking-tight" style={{ color: "#fff", fontSize: "clamp(36px, 10vw, 46px)", textShadow: "0 2px 18px rgba(20,16,42,.42)" }}>
+            the
+            <span className="sticker-wiggle mx-1.5 px-2 rounded-lg" style={{ background: C.terra, color: "#fff", boxShadow: "2px 2px 0 rgba(46,41,78,.9)" }}>
+              good
+            </span>
+            hours
+          </h1>
+        </div>
+        <div className="w-full max-w-[360px] fade-up fade-up-2">
+          <p className="font-extrabold text-[19px] leading-tight mb-4" style={{ color: "#fff", textShadow: "0 2px 14px rgba(20,16,42,.45)" }}>
+            Making the little hours shine.
+          </p>
+          <div className="flex items-center gap-3">
+            <span className="shrink-0 text-[10px] font-extrabold uppercase tracking-[.12em]" style={{ color: "rgba(255,255,255,.84)" }}>Finding your day</span>
+            <div className="h-[5px] flex-1 overflow-hidden rounded-full" style={{ background: "rgba(255,255,255,.3)", backdropFilter: "blur(6px)" }}>
+              <span className="gh-splash-progress block w-[42%] h-full rounded-full" style={{ background: C.gold }} />
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -457,6 +494,7 @@ export default function TheGoodHours() {
   // --- Auth + membership state ---
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true); // gate while restoring the session
+  const [introReady, setIntroReady] = useState(false); // brief intentional opening instead of a flat flash
   const [authStep, setAuthStep] = useState("paywall"); // paywall | app (login renders whenever there's no session)
   const [authMode, setAuthMode] = useState("signup"); // signup | signin — most arrivals are new, so lead with signing up
   const [password, setPassword] = useState("");
@@ -486,6 +524,14 @@ export default function TheGoodHours() {
     const t = setTimeout(() => setIsNativeApp(detectNativeApp()), 800);
     return () => clearTimeout(t);
   }, [isNativeApp]);
+
+  // Let at least two family moments register on a cold open. Reduced-motion
+  // users get a shorter static frame and are never forced through the carousel.
+  useEffect(() => {
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    const timer = setTimeout(() => setIntroReady(true), reduceMotion ? 900 : 3800);
+    return () => clearTimeout(timer);
+  }, []);
 
   // Meta Pixel + Google Analytics — web only. Wait a beat so the wrapper's
   // bridge can announce itself before we decide, then load only if we're
@@ -1018,7 +1064,7 @@ export default function TheGoodHours() {
   }
 
   // ---------------- AUTH SPLASH ----------------
-  if (authLoading) return <SplashScreen />;
+  if (authLoading || !introReady) return <SplashScreen />;
 
   // ---------------- SET A NEW PASSWORD (arrived from the reset email) ----------------
   if (recoveryMode) {
