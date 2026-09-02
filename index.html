@@ -7,7 +7,7 @@
     <link rel="apple-touch-icon" href="/favicon.svg" />
     <meta name="theme-color" content="#2E294E" />
     <title>The Good Hours</title>
-    <link rel="preload" as="image" href="/splash/family-chalk.jpg" fetchpriority="high" />
+    <link rel="preload" as="image" href="/splash/family-bubbles.jpg" fetchpriority="high" />
 
     <!-- Start the fonts downloading in parallel with the JS bundle -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -28,10 +28,11 @@
       #boot-splash .scene {
         position: absolute; inset: -2px; width: calc(100% + 4px); height: calc(100% + 4px);
         object-fit: cover; object-position: center; opacity: 0;
-        transform: scale(1.015); animation: bootScene 4.8s ease-in-out infinite;
+        transform: scale(1.015); animation: bootScene 6.4s ease-in-out infinite;
       }
       #boot-splash .scene:nth-child(2) { animation-delay: 1.6s; }
       #boot-splash .scene:nth-child(3) { animation-delay: 3.2s; }
+      #boot-splash .scene:nth-child(4) { animation-delay: 4.8s; }
       #boot-splash .shade { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(22,18,43,.68) 0%, rgba(22,18,43,.14) 42%, rgba(22,18,43,.76) 100%); }
       #boot-splash .content {
         position: relative; z-index: 2; min-height: 100%; box-sizing: border-box;
@@ -54,7 +55,7 @@
       #boot-splash .loading span { flex: 0 0 auto; font: 800 10px/1 'Nunito', sans-serif; letter-spacing: .12em; text-transform: uppercase; color: rgba(255,255,255,.84); }
       #boot-splash .track { flex: 1; height: 5px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.3); backdrop-filter: blur(6px); }
       #boot-splash .track i { display: block; width: 42%; height: 100%; border-radius: inherit; background: #FFB627; animation: bootProgress 1.55s ease-in-out infinite; }
-      @keyframes bootScene { 0%,28% { opacity: 1; transform: scale(1.015); } 36%,92% { opacity: 0; transform: scale(1.055); } 100% { opacity: 1; transform: scale(1.015); } }
+      @keyframes bootScene { 0%,20% { opacity: 1; transform: scale(1.015); } 26%,94% { opacity: 0; transform: scale(1.055); } 100% { opacity: 1; transform: scale(1.015); } }
       @keyframes bootBob { 0%,100% { transform: translateY(0) rotate(-6deg); } 50% { transform: translateY(-4px) rotate(2deg); } }
       @keyframes bootWiggle { 0%,100% { transform: rotate(-4deg); } 50% { transform: rotate(-1deg); } }
       @keyframes bootProgress { 0% { transform: translateX(-110%); } 100% { transform: translateX(250%); } }
@@ -67,7 +68,8 @@
   </head>
   <body>
     <div id="boot-splash">
-      <img class="scene" src="/splash/family-chalk.jpg" alt="" fetchpriority="high" />
+      <img class="scene" src="/splash/family-bubbles.jpg" alt="" fetchpriority="high" />
+      <img class="scene" src="/splash/family-chalk.jpg" alt="" />
       <img class="scene" src="/splash/family-museum.jpg" alt="" />
       <img class="scene" src="/splash/family-baking.jpg" alt="" />
       <div class="shade"></div>

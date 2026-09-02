@@ -62,10 +62,11 @@ const FONT_LINK = (
     .build-bar > span { position: absolute; top: 0; bottom: 0; width: 45%; border-radius: 999px; animation: barSlide 1.5s ease-in-out infinite; }
     @keyframes msgIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
     .build-msg { animation: msgIn .4s ease both; }
-    @keyframes splashScene { 0%,28% { opacity: 1; transform: scale(1.015); } 36%,92% { opacity: 0; transform: scale(1.055); } 100% { opacity: 1; transform: scale(1.015); } }
-    .gh-splash-scene { opacity: 0; transform: scale(1.015); animation: splashScene 4.8s ease-in-out infinite; }
+    @keyframes splashScene { 0%,20% { opacity: 1; transform: scale(1.015); } 26%,94% { opacity: 0; transform: scale(1.055); } 100% { opacity: 1; transform: scale(1.015); } }
+    .gh-splash-scene { opacity: 0; transform: scale(1.015); animation: splashScene 6.4s ease-in-out infinite; }
     .gh-splash-scene:nth-child(2) { animation-delay: 1.6s; }
     .gh-splash-scene:nth-child(3) { animation-delay: 3.2s; }
+    .gh-splash-scene:nth-child(4) { animation-delay: 4.8s; }
     @keyframes splashProgress { 0% { transform: translateX(-110%); } 100% { transform: translateX(250%); } }
     .gh-splash-progress { animation: splashProgress 1.55s ease-in-out infinite; }
     @media (prefers-reduced-motion: reduce) {
@@ -159,7 +160,7 @@ function SplashScreen() {
     <div className="mnn-root fixed inset-0 overflow-hidden" style={{ background: C.ink }} role="status" aria-label="The Good Hours is loading">
       {FONT_LINK}
       <div className="absolute inset-0" aria-hidden="true">
-        {["family-chalk.jpg", "family-museum.jpg", "family-baking.jpg"].map((name, i) => (
+        {["family-bubbles.jpg", "family-chalk.jpg", "family-museum.jpg", "family-baking.jpg"].map((name, i) => (
           <img
             key={name}
             src={`/splash/${name}`}
