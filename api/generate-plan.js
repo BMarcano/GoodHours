@@ -9,6 +9,7 @@
 
 import { dayLabel as buildDayLabel, weekdayName, isValidPlanDate } from "./_date.js";
 import { getWeatherForPlan, weatherPlanningInstructions } from "./_weather.js";
+import { spotsForPlan, spotsPromptSection, attachSavedSpots } from "./_spots.js";
 
 async function getUserFromRequest(req) {
   const supaUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
@@ -21,6 +22,40 @@ async function getUserFromRequest(req) {
   });
   if (!r.ok) return null;
   return await r.json();
+}
+
+// The family's Save Inbox (migration 11). Service role when we have it, else
+// the caller's own JWT under RLS. A missing table or any error just means "no
+// saves" — the plan must never fail because of this.
+async function loadSavedSpots(req, userId) {
+  const supaUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  const anonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const auth = req.headers.authorization || "";
+  const userToken = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!supaUrl || !(serviceKey || (anonKey && userToken))) return [];
+  const apikey = serviceKey || anonKey;
+  const bearer = serviceKey || userToken;
+  try {
+    const q = new URLSearchParams({
+      select: "id,name,description,address,event_name,event_date,event_time,price",
+      profile_id: `eq.${userId}`,
+      order: "created_at.desc",
+      limit: "60",
+    });
+    const r = await fetch(`${supaUrl}/rest/v1/saved_spots?${q}`, {
+      headers: { apikey, Authorization: `Bearer ${bearer}` },
+    });
+    if (!r.ok) {
+      console.warn("saved_spots load skipped:", r.status);
+      return [];
+    }
+    const rows = await r.json();
+    return Array.isArray(rows) ? rows : [];
+  } catch (e) {
+    console.warn("saved_spots load failed:", e?.message || e);
+    return [];
+  }
 }
 
 export default async function handler(req, res) {
@@ -76,8 +111,14 @@ export default async function handler(req, res) {
     const weekday = weekdayName(planDate);
     // Weather is a bonus, never a blocker: the helper returns a structured
     // unavailable state on geocoding, horizon, timeout, or provider errors.
-    const weather = await getWeatherForPlan({ location, planDate });
+    // Saved spots ride along with the forecast — both are context, neither blocks.
+    const [weather, allSpots] = await Promise.all([
+      getWeatherForPlan({ location, planDate }),
+      loadSavedSpots(req, user.id),
+    ]);
     const weatherInstructions = weatherPlanningInstructions(weather);
+    const spots = spotsForPlan(allSpots, planDate);
+    const spotsInstructions = spotsPromptSection(spots, { location, weekday });
 
     const prompt = `You are the planning engine for "The Good Hours", an app that builds structured daily plans for parents and caregivers of young kids.
 
@@ -88,7 +129,7 @@ Inputs:
 - This plan is for: ${dayLabel}
 
 ${weatherInstructions}
-
+${spotsInstructions ? `\n${spotsInstructions}\n` : ""}
 IMPORTANT \u2014 this plan is for ${weekday} and ONLY ${weekday}:
 - Library story times and drop-in classes are typically WEEKDAY programs; many museums close Mondays; weekends mean bigger crowds (suggest arriving at open); account for holidays if the date is one. Never suggest an activity that is unlikely to run on ${weekday}.
 - Never name a different day of the week anywhere in your output. No "Sunday market", no "great on Fridays", no "come back Saturday". If something only runs on another day, it does not belong in this plan.
@@ -101,7 +142,7 @@ Respond ONLY with valid JSON, no markdown fences, in this shape:
   "title": "short catchy plan title",
   "summary": "one sentence on the strategy of this plan",
   "blocks": [
-    { "time": "9:00\u201310:30", "activity": "name", "venue": "venue or place", "why": "one short line on why this works for these ages", "cost": "Free" }
+    { "time": "9:00\u201310:30", "activity": "name", "venue": "venue or place", "why": "one short line on why this works for these ages", "cost": "Free"${spots.length ? ', "savedSpotId": "ONLY when this block is built around one of the saved spots listed above: its exact id. Omit the key otherwise."' : ""} }
   ],
   "proTip": "one insider-style tip"
 }`;
@@ -145,7 +186,8 @@ Respond ONLY with valid JSON, no markdown fences, in this shape:
 
     // The forecast snapshot is deterministic server data. Override anything
     // the model may have tried to add under the same property.
-    res.status(200).json({ ...plan, weather });
+    // Only ids we handed the model earn the "Your save" badge.
+    res.status(200).json({ ...attachSavedSpots(plan, spots), weather });
   } catch (e) {
     console.error("generate-plan error:", e);
     res.status(500).json({ error: "Server error" });

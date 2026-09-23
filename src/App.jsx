@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Sun, MapPin, Clock, Heart, Users, Bookmark, Globe, MessageCircle, Sparkles, ChevronRight, Plus, X, Calendar, ThumbsUp, Baby, ShieldCheck, Star, Camera } from "lucide-react";
+import { Sun, MapPin, Clock, Heart, Users, Bookmark, Globe, MessageCircle, Sparkles, ChevronRight, Plus, X, Calendar, ThumbsUp, Baby, ShieldCheck, Star, Camera, Trash2, Pencil, ImagePlus, Check, Link2 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import { initPixel, initGoogleTag, trackPixel, trackGa } from "./pixel";
 
@@ -361,6 +361,78 @@ function dbPlanToUi(row) {
   };
 }
 
+// ---------- Save Inbox (spots saved from anywhere, fed into future plans) ----------
+// DB row (snake_case) → UI spot shape (camelCase)
+function dbSpotToUi(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    address: row.address,
+    eventName: row.event_name,
+    eventDate: row.event_date,
+    eventTime: row.event_time,
+    price: row.price,
+    sourceUrl: row.source_url,
+    sourceType: row.source_type,
+    confidence: row.confidence,
+    createdAt: row.created_at,
+  };
+}
+
+// "Sat, Oct 3" for a dated save
+function shortDate(isoDate) {
+  return new Date(isoDate + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+}
+
+// One Claude call turns a link / a few words / a screenshot into a spot row.
+async function extractSpot({ text, image }, accessToken) {
+  const res = await fetch("/api/extract-spot", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
+    body: JSON.stringify({ text, image }),
+  });
+  if (!res.ok) {
+    let msg = "Couldn't read that — try again in a moment.";
+    try { msg = (await res.json()).error || msg; } catch (e) { /* non-JSON error body */ }
+    throw new Error(msg);
+  }
+  return (await res.json()).spot;
+}
+
+// Phone screenshots are 2–8 MB and the API accepts 4.5 MB, so the browser
+// shrinks them first. A 1400 px long side keeps Instagram captions readable.
+function loadImageElement(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("bad image")); };
+    img.src = url;
+  });
+}
+async function fileToJpegBase64(file, maxSide = 1400, quality = 0.82) {
+  const source = window.createImageBitmap
+    ? await createImageBitmap(file).catch(() => loadImageElement(file))
+    : await loadImageElement(file);
+  const w = source.width || source.naturalWidth;
+  const h = source.height || source.naturalHeight;
+  const scale = Math.min(1, maxSide / Math.max(w, h));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(w * scale));
+  canvas.height = Math.max(1, Math.round(h * scale));
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff"; // PNG transparency would turn black in a JPEG
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+  if (source.close) source.close();
+  const dataUrl = canvas.toDataURL("image/jpeg", quality);
+  return dataUrl.slice(dataUrl.indexOf(",") + 1);
+}
+
 // ---------- Small components ----------
 function Pill({ children, tone = "sage" }) {
   const tones = {
@@ -518,6 +590,13 @@ export default function TheGoodHours() {
   const [events, setEvents] = useState(null);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsPlanId, setEventsPlanId] = useState(null); // events belong to the plan that generated them
+  // Save Inbox: spots saved from anywhere; the generator weaves in the ones that fit
+  const [spots, setSpots] = useState([]);
+  const [spotText, setSpotText] = useState("");
+  const [spotBusy, setSpotBusy] = useState(null); // null | "reading" | "saving"
+  const [spotError, setSpotError] = useState("");
+  const [spotEditing, setSpotEditing] = useState(null); // { id, name, address } while editing inline
+  const [spotJustSaved, setSpotJustSaved] = useState(null); // briefly highlight the newest save
 
   // The wrapper can inject its JS bridge after first paint — re-check once
   useEffect(() => {
@@ -638,6 +717,11 @@ export default function TheGoodHours() {
         setFeedComments({});
         setExpandedPost(null);
         setNewComment("");
+        setSpots([]);
+        setSpotText("");
+        setSpotBusy(null);
+        setSpotError("");
+        setSpotEditing(null);
       }
     });
     return () => subscription.unsubscribe();
@@ -651,7 +735,7 @@ export default function TheGoodHours() {
     setDataLoading(true);
     (async () => {
       const fetchSub = () => supabase.from("subscriptions").select("status").eq("profile_id", userId).maybeSingle();
-      const [profileRes, subRes, plansRes, sponsorRes, adminRes, cfgRes, feedRes] = await Promise.all([
+      const [profileRes, subRes, plansRes, sponsorRes, adminRes, cfgRes, feedRes, spotsRes] = await Promise.all([
         supabase.from("profiles").select("free_plans_used").eq("id", userId).maybeSingle(),
         fetchSub(),
         supabase.from("plans").select("*").eq("profile_id", userId).order("created_at", { ascending: false }),
@@ -659,6 +743,7 @@ export default function TheGoodHours() {
         supabase.rpc("is_admin"), // errors harmlessly (→ false) until migration 5 is applied
         supabase.from("app_config").select("community_live").eq("id", 1).maybeSingle(),
         supabase.rpc("community_feed"), // errors harmlessly (→ []) until migration 6 is applied
+        supabase.from("saved_spots").select("*").eq("profile_id", userId).order("created_at", { ascending: false }), // errors harmlessly (→ []) until migration 11 is applied
       ]);
       if (cancelled) return;
       setFeatured(sponsorRes.data?.[0] ? dbSponsorToUi(sponsorRes.data[0]) : null);
@@ -683,6 +768,7 @@ export default function TheGoodHours() {
       setPreviewUsed(used >= 1);
       setIsMember(member);
       setSavedPlans((plansRes.data ?? []).map(dbPlanToUi));
+      setSpots((spotsRes.data ?? []).map(dbSpotToUi));
       // members land straight in the app; everyone else meets the paywall
       setPreviewMode(false);
       setAuthStep(member ? "app" : "paywall");
@@ -1012,6 +1098,70 @@ export default function TheGoodHours() {
       const { data: fresh } = await supabase.rpc("community_feed");
       setFeed(fresh ?? []); // the newly public plan now shows in the real feed
     }
+  }
+
+  // --- Save Inbox ---
+  async function saveSpotRow(spot) {
+    const { data, error: sErr } = await supabase
+      .from("saved_spots")
+      .insert({ profile_id: session.user.id, ...spot })
+      .select()
+      .single();
+    if (sErr || !data) {
+      // table not there yet (migration 11) reads as a relation error
+      throw new Error(/saved_spots|relation|schema cache/i.test(sErr?.message || "") ? "Saving spots isn't switched on yet — check back soon." : "Couldn't save that spot — try again.");
+    }
+    const ui = dbSpotToUi(data);
+    setSpots((prev) => [ui, ...prev]);
+    setSpotJustSaved(ui.id);
+    setTimeout(() => setSpotJustSaved(null), 2400);
+    // low confidence: open the inline editor right away so they can fix the name/address
+    if (ui.confidence === "low") setSpotEditing({ id: ui.id, name: ui.name, address: ui.address || "" });
+  }
+  async function handleSaveSpotText() {
+    const text = spotText.trim();
+    if (!text || spotBusy || !session?.user?.id) return;
+    setSpotBusy("reading");
+    setSpotError("");
+    try {
+      const spot = await extractSpot({ text }, session.access_token);
+      setSpotBusy("saving");
+      await saveSpotRow(spot);
+      setSpotText("");
+    } catch (e) {
+      setSpotError(e.message || "Couldn't save that spot — try again.");
+    }
+    setSpotBusy(null);
+  }
+  async function handleSaveSpotImage(file) {
+    if (!file || spotBusy || !session?.user?.id) return;
+    setSpotBusy("reading");
+    setSpotError("");
+    try {
+      const data = await fileToJpegBase64(file);
+      const spot = await extractSpot({ text: spotText.trim(), image: { mediaType: "image/jpeg", data } }, session.access_token);
+      setSpotBusy("saving");
+      await saveSpotRow(spot);
+      setSpotText("");
+    } catch (e) {
+      setSpotError(e.message === "bad image" ? "Couldn't open that image — try a screenshot (PNG or JPG)." : e.message || "Couldn't read that screenshot — try another.");
+    }
+    setSpotBusy(null);
+  }
+  async function deleteSpot(id) {
+    setSpots((prev) => prev.filter((s) => s.id !== id)); // optimistic; RLS scopes the delete to the owner
+    if (spotEditing?.id === id) setSpotEditing(null);
+    await supabase.from("saved_spots").delete().eq("id", id);
+  }
+  async function saveSpotEdit() {
+    if (!spotEditing) return;
+    const name = spotEditing.name.trim();
+    if (!name) return;
+    const address = spotEditing.address.trim() || null;
+    // a parent-confirmed name is as good as a clean extraction
+    const { data } = await supabase.from("saved_spots").update({ name, address, confidence: "high" }).eq("id", spotEditing.id).select().single();
+    if (data) setSpots((prev) => prev.map((s) => (s.id === data.id ? dbSpotToUi(data) : s)));
+    setSpotEditing(null);
   }
 
   async function toggleLike(planId) {
@@ -1537,8 +1687,11 @@ export default function TheGoodHours() {
                           {i < plan.blocks.length - 1 && <div className="w-0.5 flex-1 mt-2 rounded" style={{ background: "#F3EBDA" }} />}
                         </div>
                         <div className="flex-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-extrabold" style={{ color: C.terra }}>{b.time}</span>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-extrabold flex items-center gap-1.5 flex-wrap" style={{ color: C.terra }}>
+                              {b.time}
+                              {b.yourSave && <Pill tone="gold">⭐ Your save</Pill>}
+                            </span>
                             <Pill tone={b.cost?.toLowerCase() === "free" ? "sage" : "gold"}>{b.cost}</Pill>
                           </div>
                           <h3 className="font-extrabold mt-1" style={{ color: C.ink }}>{b.activity}</h3>
@@ -1634,8 +1787,182 @@ export default function TheGoodHours() {
           {/* ---------------- SAVED TAB ---------------- */}
           {tab === "saved" && (
             <div className="space-y-3">
+              {/* ---- Save Inbox: paste a link or drop a screenshot; plans use the saves that fit ---- */}
+              <section className="fade-up rounded-3xl p-5" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
+                <div className="flex items-center gap-2 mb-1">
+                  <Star size={18} style={{ color: C.gold }} fill={C.gold} />
+                  <h2 className="font-extrabold text-sm" style={{ color: C.ink }}>Save a spot</h2>
+                </div>
+                <p className="text-[11px] font-semibold mb-3 leading-relaxed" style={{ color: C.inkSoft }}>
+                  Saw a place on Instagram or in a text? Save it here and we'll work it into a plan when it fits the day.
+                </p>
+                <input
+                  value={spotText}
+                  onChange={(e) => setSpotText(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleSaveSpotText(); }}
+                  disabled={!!spotBusy}
+                  placeholder="Paste a link or type a few words"
+                  className="w-full rounded-xl px-4 py-3 text-sm font-semibold outline-none border-2"
+                  style={{ borderColor: "#F3EBDA", color: C.ink, background: C.cream }}
+                />
+                <div className="flex gap-2 mt-2">
+                  <button
+                    disabled={!spotText.trim() || !!spotBusy}
+                    onClick={handleSaveSpotText}
+                    className="flex-1 rounded-xl py-3 text-xs font-extrabold flex items-center justify-center gap-1.5 transition-all active:scale-[.98]"
+                    style={{
+                      background: spotText.trim() && !spotBusy ? C.terra : "#EAE6F2",
+                      color: spotText.trim() && !spotBusy ? "#fff" : C.inkSoft,
+                    }}
+                  >
+                    <Link2 size={14} /> Save it
+                  </button>
+                  <label
+                    className="flex-1 rounded-xl py-3 text-xs font-extrabold flex items-center justify-center gap-1.5 border-2 transition-all active:scale-[.98]"
+                    style={{ borderColor: C.ink, color: C.ink, cursor: spotBusy ? "default" : "pointer", opacity: spotBusy ? 0.5 : 1 }}
+                  >
+                    <ImagePlus size={14} /> Screenshot
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      disabled={!!spotBusy}
+                      onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; handleSaveSpotImage(f); }}
+                    />
+                  </label>
+                </div>
+                {spotBusy && (
+                  <p className="text-xs font-bold mt-3 flex items-center gap-2" style={{ color: C.inkSoft }}>
+                    <span className="w-2 h-2 rounded-full animate-ping" style={{ background: C.gold }} />
+                    {spotBusy === "reading" ? "Reading your save…" : "Saving…"}
+                  </p>
+                )}
+                {spotError && (
+                  <div className="mt-3 rounded-2xl px-4 py-3 text-xs font-bold" style={{ background: C.terraSoft, color: C.terra }}>
+                    {spotError}
+                  </div>
+                )}
+              </section>
+
+              {spots.length > 0 && (
+                <div className="fade-up fade-up-1">
+                  <p className="text-xs font-extrabold px-1 mb-2 flex items-center gap-1.5" style={{ color: C.ink }}>
+                    <Star size={13} style={{ color: C.gold }} fill={C.gold} /> Your spots · {spots.length}
+                  </p>
+                  <div className="space-y-2">
+                    {spots.map((s) =>
+                      spotEditing?.id === s.id ? (
+                        <div key={s.id} className="rounded-2xl p-4 space-y-2" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)", border: `2px solid ${C.gold}` }}>
+                          <p className="text-[10px] font-extrabold uppercase tracking-wide" style={{ color: C.inkSoft }}>
+                            {s.confidence === "low" ? "We couldn't read all of it — fix what's off" : "Edit spot"}
+                          </p>
+                          <input
+                            value={spotEditing.name}
+                            onChange={(e) => setSpotEditing({ ...spotEditing, name: e.target.value })}
+                            onKeyDown={(e) => { if (e.key === "Enter") saveSpotEdit(); }}
+                            placeholder="Place name"
+                            autoFocus
+                            className="w-full rounded-xl px-4 py-2.5 text-sm font-semibold outline-none border-2"
+                            style={{ borderColor: "#F3EBDA", color: C.ink, background: C.cream }}
+                          />
+                          <input
+                            value={spotEditing.address}
+                            onChange={(e) => setSpotEditing({ ...spotEditing, address: e.target.value })}
+                            onKeyDown={(e) => { if (e.key === "Enter") saveSpotEdit(); }}
+                            placeholder="Address or neighborhood"
+                            className="w-full rounded-xl px-4 py-2.5 text-sm font-semibold outline-none border-2"
+                            style={{ borderColor: "#F3EBDA", color: C.ink, background: C.cream }}
+                          />
+                          <div className="flex gap-2 items-center">
+                            <button
+                              disabled={!spotEditing.name.trim()}
+                              onClick={saveSpotEdit}
+                              className="px-4 py-2 rounded-xl text-xs font-extrabold flex items-center gap-1.5 transition-all active:scale-95"
+                              style={{ background: spotEditing.name.trim() ? C.terra : "#EAE6F2", color: spotEditing.name.trim() ? "#fff" : C.inkSoft }}
+                            >
+                              <Check size={14} /> Save
+                            </button>
+                            <button onClick={() => setSpotEditing(null)} className="px-3 py-2 text-xs font-extrabold" style={{ color: C.inkSoft }}>
+                              cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div
+                          key={s.id}
+                          className="rounded-2xl p-4"
+                          style={{
+                            background: C.card,
+                            boxShadow: "0 2px 12px rgba(46,41,78,.07)",
+                            borderLeft: `4px solid ${C.gold}`,
+                            outline: spotJustSaved === s.id ? `2px solid ${C.gold}` : "none",
+                            transition: "outline-color .4s ease",
+                          }}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex-1 min-w-0">
+                              <h4 className="font-extrabold text-sm" style={{ color: C.ink }}>{s.name}</h4>
+                              {(s.eventName || s.eventDate || s.eventTime) && (
+                                <p className="text-xs font-bold mt-0.5" style={{ color: C.terra }}>
+                                  {[s.eventName, s.eventDate && shortDate(s.eventDate), s.eventTime].filter(Boolean).join(" · ")}
+                                </p>
+                              )}
+                              {s.description && (
+                                <p className="text-xs font-semibold mt-1 leading-relaxed" style={{ color: C.inkSoft }}>{s.description}</p>
+                              )}
+                              {s.address && (
+                                <p className="text-[11px] font-bold mt-1 flex items-center gap-1" style={{ color: C.inkSoft }}>
+                                  <MapPin size={11} /> {s.address}
+                                </p>
+                              )}
+                              {(s.price || s.confidence === "low" || s.sourceUrl) && (
+                                <div className="flex gap-1.5 mt-2 flex-wrap items-center">
+                                  {s.price && <Pill tone={String(s.price).toLowerCase() === "free" ? "sage" : "gold"}>{s.price}</Pill>}
+                                  {s.confidence === "low" && <Pill tone="terra">check the details</Pill>}
+                                  {s.sourceUrl && (
+                                    <a href={s.sourceUrl} target="_blank" rel="noopener noreferrer" className="text-[10px] font-bold underline" style={{ color: C.inkSoft }}>
+                                      source
+                                    </a>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex flex-col gap-1 shrink-0">
+                              <button
+                                onClick={() => setSpotEditing({ id: s.id, name: s.name, address: s.address || "" })}
+                                className="p-2 rounded-xl transition-all active:scale-95"
+                                style={{ background: C.cream, color: C.ink }}
+                                aria-label="Edit spot"
+                              >
+                                <Pencil size={14} />
+                              </button>
+                              <button
+                                onClick={() => deleteSpot(s.id)}
+                                className="p-2 rounded-xl transition-all active:scale-95"
+                                style={{ background: C.terraSoft, color: C.terra }}
+                                aria-label="Delete spot"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    )}
+                  </div>
+                  <p className="text-[10px] font-semibold px-1 mt-2" style={{ color: C.inkSoft }}>
+                    When a saved spot fits the day, it shows up in your plan with a ⭐ Your save badge.
+                  </p>
+                </div>
+              )}
+
+              {(spots.length > 0 || savedPlans.length > 0) && (
+                <p className="text-xs font-extrabold px-1 pt-1 flex items-center gap-1.5" style={{ color: C.ink }}>
+                  <Bookmark size={13} style={{ color: C.terra }} /> Saved plans
+                </p>
+              )}
               {savedPlans.length === 0 ? (
-                <div className="text-center pt-16">
+                <div className="text-center pt-8 pb-4">
                   <Bookmark size={36} className="mx-auto mb-3" style={{ color: "#DCD7EA" }} />
                   <p className="font-bold" style={{ color: C.inkSoft }}>Saved plans live here.</p>
                   <p className="text-xs font-semibold mt-1" style={{ color: C.inkSoft }}>Build a day and save it to reuse the good ones.</p>
