@@ -10,6 +10,7 @@
 import { dayLabel as buildDayLabel, weekdayName, isValidPlanDate } from "./_date.js";
 import { getWeatherForPlan, weatherPlanningInstructions } from "./_weather.js";
 import { spotsForPlan, spotsPromptSection, attachSavedSpots } from "./_spots.js";
+import { isAfterSchool, afterSchoolInstructions, napWindowInstructions } from "./_planmodes.js";
 
 async function getUserFromRequest(req) {
   const supaUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
@@ -65,7 +66,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { ages = [], slots = [], location = "", planDate = "" } = req.body || {};
+    const { ages = [], slots = [], location = "", planDate = "", napWindow = "" } = req.body || {};
 
     const cleanAges = ages.filter((a) => String(a || "").trim());
     const cleanSlots = slots.filter((s) => s && s.from && s.to);
@@ -119,6 +120,10 @@ export default async function handler(req, res) {
     const weatherInstructions = weatherPlanningInstructions(weather);
     const spots = spotsForPlan(allSpots, planDate);
     const spotsInstructions = spotsPromptSection(spots, { location, weekday });
+    // Family shape: a nap window set once in the profile, and the after-school
+    // (3–6 PM) plan type detected from the hours themselves.
+    const napInstructions = napWindowInstructions(napWindow);
+    const afterSchool = isAfterSchool(cleanSlots);
 
     const prompt = `You are the planning engine for "The Good Hours", an app that builds structured daily plans for parents and caregivers of young kids.
 
@@ -129,7 +134,7 @@ Inputs:
 - This plan is for: ${dayLabel}
 
 ${weatherInstructions}
-${spotsInstructions ? `\n${spotsInstructions}\n` : ""}
+${spotsInstructions ? `\n${spotsInstructions}\n` : ""}${napInstructions ? `\n${napInstructions}\n` : ""}${afterSchool ? `\n${afterSchoolInstructions()}\n` : ""}
 IMPORTANT \u2014 this plan is for ${weekday} and ONLY ${weekday}:
 - Library story times and drop-in classes are typically WEEKDAY programs; many museums close Mondays; weekends mean bigger crowds (suggest arriving at open); account for holidays if the date is one. Never suggest an activity that is unlikely to run on ${weekday}.
 - Never name a different day of the week anywhere in your output. No "Sunday market", no "great on Fridays", no "come back Saturday". If something only runs on another day, it does not belong in this plan.

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Sun, MapPin, Clock, Heart, Users, Bookmark, Globe, MessageCircle, Sparkles, ChevronRight, Plus, X, Calendar, ThumbsUp, Baby, ShieldCheck, Star, Camera, Trash2, Pencil, ImagePlus, Check, Link2 } from "lucide-react";
+import { Sun, MapPin, Clock, Heart, Users, Bookmark, Globe, MessageCircle, Sparkles, ChevronRight, Plus, X, Calendar, ThumbsUp, Baby, ShieldCheck, Star, Camera, Trash2, Pencil, ImagePlus, Check, Link2, ThumbsDown, RotateCcw } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import { initPixel, initGoogleTag, trackPixel, trackGa } from "./pixel";
 
@@ -153,6 +153,17 @@ const BUILD_STEPS = [
   "Finding a coffee stop for the grown-up…",
   "Putting your day in order…",
 ];
+
+// Quick shapes for the hours card. "After school" flips the generator into
+// its wind-down mode (snack + movement first, one anchor, home by dinner).
+const SLOT_PRESETS = [
+  { label: "Morning · 9–12", slots: [{ from: "9:00 AM", to: "12:00 PM" }] },
+  { label: "After school · 3–6 PM", slots: [{ from: "3:00 PM", to: "6:00 PM" }] },
+  { label: "Weekend day · 9–3", slots: [{ from: "9:00 AM", to: "3:00 PM" }] },
+];
+function sameSlots(a, b) {
+  return a.length === b.length && a.every((s, i) => s.from === b[i].from && s.to === b[i].to);
+}
 
 // ---------- Splash: shown while the session and the user's data load ----------
 function SplashScreen() {
@@ -314,14 +325,14 @@ function FeaturedInvite({ neighborhood }) {
 }
 
 // ---------- Plan generation (server-side, key protected) ----------
-async function generatePlan({ ages, slots, location, planDate }, accessToken) {
+async function generatePlan({ ages, slots, location, planDate, napWindow }, accessToken) {
   const res = await fetch("/api/generate-plan", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     },
-    body: JSON.stringify({ ages, slots, location, planDate }),
+    body: JSON.stringify({ ages, slots, location, planDate, napWindow }),
   });
   if (res.status === 402) throw new Error("membership_required");
   if (!res.ok) throw new Error("Plan generation failed");
@@ -355,10 +366,46 @@ function dbPlanToUi(row) {
     ages: row.ages ?? [],
     blocks: row.blocks ?? [],
     proTip: row.pro_tip,
+    slots: row.slots ?? null,
     weather: row.weather_context ?? null,
     isPublic: row.is_public,
     savedAt: new Date(row.created_at).toLocaleDateString(),
   };
+}
+
+// A plan that lives in the DB (uuid) vs a fresh, unsaved one (Date.now() id)
+function isSavedPlan(plan) {
+  return typeof plan?.id === "string" && plan.id.length === 36;
+}
+
+// Plans saved before migration 12 don't carry their hours — read them back off
+// the first and last block so "Run it back" still works for old saves.
+function slotsFromBlocks(blocks) {
+  const times = (blocks || []).map((b) => String(b?.time || "")).filter(Boolean);
+  if (!times.length) return null;
+  const first = times[0].split(/[\u2013\u2014-]/)[0].trim();
+  const lastParts = times[times.length - 1].split(/[\u2013\u2014-]/);
+  const last = (lastParts[1] || lastParts[0]).trim();
+  return first && last ? [{ from: first, to: last }] : null;
+}
+
+// Backup swap: one replacement stop, nothing else in the day changes.
+async function swapPlanBlock({ plan, blockIndex, reason }, accessToken) {
+  const res = await fetch("/api/swap-block", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
+    body: JSON.stringify({
+      plan: { location: plan.location, ages: plan.ages, planDate: plan.planDate, blocks: plan.blocks },
+      blockIndex,
+      reason,
+      weather: plan.weather ?? null,
+    }),
+  });
+  if (!res.ok) throw new Error("Swap failed");
+  return (await res.json()).block;
 }
 
 // ---------- Save Inbox (spots saved from anywhere, fed into future plans) ----------
@@ -597,6 +644,10 @@ export default function TheGoodHours() {
   const [spotError, setSpotError] = useState("");
   const [spotEditing, setSpotEditing] = useState(null); // { id, name, address } while editing inline
   const [spotJustSaved, setSpotJustSaved] = useState(null); // briefly highlight the newest save
+  const [napWindow, setNapWindow] = useState(""); // profiles.nap_window — set once, every plan respects it
+  const [napSavedFlash, setNapSavedFlash] = useState(false);
+  const [ratings, setRatings] = useState({}); // { "planId:blockIndex": 1 | -1 } — post-day thumbs
+  const [swapping, setSwapping] = useState(null); // block index being swapped for a backup
 
   // The wrapper can inject its JS bridge after first paint — re-check once
   useEffect(() => {
@@ -722,6 +773,9 @@ export default function TheGoodHours() {
         setSpotBusy(null);
         setSpotError("");
         setSpotEditing(null);
+        setNapWindow("");
+        setRatings({});
+        setSwapping(null);
       }
     });
     return () => subscription.unsubscribe();
@@ -735,7 +789,7 @@ export default function TheGoodHours() {
     setDataLoading(true);
     (async () => {
       const fetchSub = () => supabase.from("subscriptions").select("status").eq("profile_id", userId).maybeSingle();
-      const [profileRes, subRes, plansRes, sponsorRes, adminRes, cfgRes, feedRes, spotsRes] = await Promise.all([
+      const [profileRes, subRes, plansRes, sponsorRes, adminRes, cfgRes, feedRes, spotsRes, napRes, ratingsRes] = await Promise.all([
         supabase.from("profiles").select("free_plans_used").eq("id", userId).maybeSingle(),
         fetchSub(),
         supabase.from("plans").select("*").eq("profile_id", userId).order("created_at", { ascending: false }),
@@ -744,6 +798,8 @@ export default function TheGoodHours() {
         supabase.from("app_config").select("community_live").eq("id", 1).maybeSingle(),
         supabase.rpc("community_feed"), // errors harmlessly (→ []) until migration 6 is applied
         supabase.from("saved_spots").select("*").eq("profile_id", userId).order("created_at", { ascending: false }), // errors harmlessly (→ []) until migration 11 is applied
+        supabase.from("profiles").select("nap_window").eq("id", userId).maybeSingle(), // separate query so the free-plan counter above never depends on migration 12
+        supabase.from("venue_ratings").select("plan_id,block_index,rating").eq("profile_id", userId), // errors harmlessly (→ {}) until migration 12 is applied
       ]);
       if (cancelled) return;
       setFeatured(sponsorRes.data?.[0] ? dbSponsorToUi(sponsorRes.data[0]) : null);
@@ -769,6 +825,8 @@ export default function TheGoodHours() {
       setIsMember(member);
       setSavedPlans((plansRes.data ?? []).map(dbPlanToUi));
       setSpots((spotsRes.data ?? []).map(dbSpotToUi));
+      setNapWindow(napRes.data?.nap_window ?? "");
+      setRatings(Object.fromEntries((ratingsRes.data ?? []).map((r) => [`${r.plan_id}:${r.block_index}`, r.rating])));
       // members land straight in the app; everyone else meets the paywall
       setPreviewMode(false);
       setAuthStep(member ? "app" : "paywall");
@@ -995,17 +1053,21 @@ export default function TheGoodHours() {
   }
 
   const canGenerate = ages.some((a) => a.trim()) && location.trim() && slots.some((s) => s.from && s.to);
+  // Yesterday's saved plan with no ratings yet → a one-line nudge on the Build tab
+  const yesterdayIso = localDateStr(new Date(Date.now() - 86400000));
+  const yesterdayPlan = savedPlans.find((p) => p.planDate === yesterdayIso && !Object.keys(ratings).some((k) => k.startsWith(`${p.id}:`)));
 
-  async function handleGenerate() {
+  async function handleGenerate(overrides) {
+    const input = { ages, slots, location, planDate, ...(overrides || {}) };
     // Preview users get exactly one plan — second attempt returns to paywall
     if (previewMode && previewUsed) { setAuthStep("paywall"); return; }
     setLoading(true);
     setError("");
     try {
       const token = session?.access_token;
-      const p = await generatePlan({ ages, slots, location, planDate }, token);
+      const p = await generatePlan({ ...input, napWindow }, token);
       const genId = Date.now();
-      setPlan({ ...p, id: genId, location, ages: [...ages], planDate, isPublic: false, savedAt: null });
+      setPlan({ ...p, id: genId, location: input.location, ages: [...input.ages], planDate: input.planDate, slots: input.slots, isPublic: false, savedAt: null });
       setTab("plan");
       if (previewMode) {
         // the server increments profiles.free_plans_used atomically
@@ -1021,10 +1083,10 @@ export default function TheGoodHours() {
       const mergeEvents = (partial) =>
         setEvents((prev) => ({ local: [], worthTheTrip: [], ...(prev || {}), ...partial }));
       Promise.allSettled([
-        fetchTodaysEvents({ location, planDate, ages, kind: "local", weather: p.weather }, token)
+        fetchTodaysEvents({ location: input.location, planDate: input.planDate, ages: input.ages, kind: "local", weather: p.weather }, token)
           .then(mergeEvents)
           .catch(() => mergeEvents({ local: [] })),
-        fetchTodaysEvents({ location, planDate, ages, kind: "trip", weather: p.weather }, token)
+        fetchTodaysEvents({ location: input.location, planDate: input.planDate, ages: input.ages, kind: "trip", weather: p.weather }, token)
           .then(mergeEvents)
           .catch(() => mergeEvents({ worthTheTrip: [] })),
       ]).then(() => setEventsLoading(false));
@@ -1072,6 +1134,7 @@ export default function TheGoodHours() {
       ages: plan.ages,
       blocks: plan.blocks,
       pro_tip: plan.proTip,
+      slots: plan.slots ?? null,
       weather_context: plan.weather ?? null,
       is_public: makePublic,
     };
@@ -1081,8 +1144,10 @@ export default function TheGoodHours() {
     // Rolling-deploy safety: if the frontend lands just before migration 0010,
     // saving still works; the weather snapshot begins persisting once the new
     // column is visible in Supabase's schema cache.
-    if (saveError && /weather_context/i.test(saveError.message || "")) {
-      const { weather_context: _weatherContext, ...legacyPayload } = payload;
+    if (saveError && /weather_context|slots/i.test(saveError.message || "")) {
+      const legacyPayload = { ...payload };
+      if (/slots/i.test(saveError.message)) delete legacyPayload.slots;
+      if (/weather_context/i.test(saveError.message)) delete legacyPayload.weather_context;
       ({ data, error: saveError } = await supabase.from("plans").upsert(legacyPayload).select().single());
     }
     setSaving(false);
@@ -1098,6 +1163,73 @@ export default function TheGoodHours() {
       const { data: fresh } = await supabase.rpc("community_feed");
       setFeed(fresh ?? []); // the newly public plan now shows in the real feed
     }
+  }
+
+  // --- Nap window: set once in the profile, sent with every plan ---
+  async function saveNapWindow() {
+    if (!session?.user?.id) return;
+    const value = napWindow.trim() || null;
+    const { error: nErr } = await supabase.from("profiles").update({ nap_window: value }).eq("id", session.user.id);
+    if (nErr) return; // column not there yet (migration 12) — the plan still gets it for this session
+    setNapSavedFlash(true);
+    setTimeout(() => setNapSavedFlash(false), 1600);
+  }
+
+  // --- Run it back: a saved plan rebuilt for today — same kids, hours and
+  // neighborhood, fresh events and current opening hours ---
+  function runItBack(p) {
+    const today = localDateStr();
+    const savedAges = (p.ages || []).filter(Boolean);
+    const nextAges = savedAges.length ? savedAges : ages;
+    const nextSlots = (Array.isArray(p.slots) && p.slots.length ? p.slots : slotsFromBlocks(p.blocks)) || slots;
+    const nextLocation = p.location || location;
+    setAges(nextAges);
+    setSlots(nextSlots);
+    setLocation(nextLocation);
+    setPlanDate(today);
+    handleGenerate({ ages: nextAges, slots: nextSlots, location: nextLocation, planDate: today });
+  }
+
+  // --- Post-day rating: one tap per stop; tap again to clear ---
+  async function rateBlock(planId, idx, block, rating) {
+    if (!session?.user?.id) return;
+    const key = `${planId}:${idx}`;
+    const next = ratings[key] === rating ? null : rating;
+    setRatings((prev) => {
+      const copy = { ...prev };
+      if (next === null) delete copy[key];
+      else copy[key] = next;
+      return copy;
+    });
+    if (next === null) {
+      await supabase.from("venue_ratings").delete().eq("profile_id", session.user.id).eq("plan_id", planId).eq("block_index", idx);
+    } else {
+      await supabase.from("venue_ratings").upsert(
+        { profile_id: session.user.id, plan_id: planId, block_index: idx, venue: block.venue || null, activity: block.activity || null, rating: next },
+        { onConflict: "profile_id,plan_id,block_index" }
+      );
+    }
+  }
+
+  // --- Backup swap: this stop is closed/packed → one nearby alternative,
+  // the rest of the day untouched. Saved plans persist the swap quietly. ---
+  async function swapBlock(i) {
+    if (!plan || swapping !== null) return;
+    setSwapping(i);
+    setError("");
+    try {
+      const block = await swapPlanBlock({ plan, blockIndex: i, reason: "closed" }, session?.access_token);
+      const blocks = plan.blocks.map((b, j) => (j === i ? { ...block, swapped: true } : b));
+      const next = { ...plan, blocks };
+      setPlan(next);
+      if (isSavedPlan(plan)) {
+        await supabase.from("plans").update({ blocks }).eq("id", plan.id);
+        setSavedPlans((prev) => prev.map((p) => (p.id === plan.id ? next : p)));
+      }
+    } catch (e) {
+      setError("Couldn't find a backup for that stop — try again in a moment.");
+    }
+    setSwapping(null);
   }
 
   // --- Save Inbox ---
@@ -1503,6 +1635,16 @@ export default function TheGoodHours() {
           {/* ---------------- BUILD TAB ---------------- */}
           {tab === "build" && (
             <div className="space-y-4">
+              {yesterdayPlan && (
+                <button
+                  onClick={() => { setPlan(yesterdayPlan); setTab("plan"); }}
+                  className="fade-up w-full rounded-2xl px-4 py-3 flex items-center justify-between gap-2"
+                  style={{ background: C.sageSoft }}
+                >
+                  <p className="text-[11px] font-extrabold text-left" style={{ color: "#0E7C72" }}>How was yesterday's plan? Tap to rate the stops 👍👎</p>
+                  <ChevronRight size={16} className="shrink-0" style={{ color: "#0E7C72" }} />
+                </button>
+              )}
               {/* Kids */}
               <section className="fade-up rounded-3xl p-5" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
                 <div className="flex items-center gap-2 mb-3">
@@ -1534,6 +1676,20 @@ export default function TheGoodHours() {
                 >
                   <Plus size={14} /> add another kid
                 </button>
+                <div className="mt-3 pt-3" style={{ borderTop: "2px solid #F3EBDA" }}>
+                  <p className="text-[11px] font-extrabold mb-1.5" style={{ color: C.inkSoft }}>
+                    Nap window <span className="font-semibold">(optional · set once, every plan works around it)</span>
+                  </p>
+                  <input
+                    value={napWindow}
+                    onChange={(e) => setNapWindow(e.target.value)}
+                    onBlur={saveNapWindow}
+                    onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+                    placeholder="e.g. 12:30–2:30 PM"
+                    className="w-full rounded-xl px-4 py-3 text-sm font-semibold outline-none border-2"
+                    style={{ borderColor: napSavedFlash ? C.sage : "#F3EBDA", color: C.ink, background: C.cream, transition: "border-color .3s" }}
+                  />
+                </div>
               </section>
 
               {/* Time slots */}
@@ -1541,6 +1697,25 @@ export default function TheGoodHours() {
                 <div className="flex items-center gap-2 mb-3">
                   <Clock size={18} style={{ color: C.terra }} />
                   <h2 className="font-extrabold text-sm" style={{ color: C.ink }}>Which hours need a plan?</h2>
+                </div>
+                <div className="flex gap-2 flex-wrap mb-3">
+                  {SLOT_PRESETS.map((pr) => {
+                    const active = sameSlots(slots, pr.slots);
+                    return (
+                      <button
+                        key={pr.label}
+                        onClick={() => setSlots(pr.slots.map((x) => ({ ...x })))}
+                        className="px-3 py-2 rounded-xl text-[11px] font-extrabold transition-all active:scale-95"
+                        style={{
+                          background: active ? C.terra : C.cream,
+                          color: active ? "#fff" : C.ink,
+                          border: `2px solid ${active ? C.terra : "#F3EBDA"}`,
+                        }}
+                      >
+                        {pr.label}
+                      </button>
+                    );
+                  })}
                 </div>
                 <div className="space-y-2">
                   {slots.map((s, i) => (
@@ -1637,7 +1812,7 @@ export default function TheGoodHours() {
 
               <button
                 disabled={!canGenerate || loading}
-                onClick={handleGenerate}
+                onClick={() => handleGenerate()}
                 className="fade-up fade-up-3 w-full rounded-2xl py-4 font-extrabold text-base flex items-center justify-center gap-2 transition-all active:scale-[.98]"
                 style={{
                   background: canGenerate ? C.terra : "#EAE6F2",
@@ -1675,6 +1850,17 @@ export default function TheGoodHours() {
                     <p className="text-sm mt-1 font-semibold" style={{ color: "#B8B3D1" }}>{plan.summary}</p>
                   </div>
 
+                  {isSavedPlan(plan) && plan.planDate !== localDateStr() && (
+                    <button
+                      onClick={() => runItBack(plan)}
+                      disabled={loading}
+                      className="fade-up w-full rounded-2xl py-3 text-xs font-extrabold flex items-center justify-center gap-1.5 border-2 transition-all active:scale-[.98]"
+                      style={{ borderColor: C.ink, color: C.ink, background: C.card }}
+                    >
+                      <RotateCcw size={14} /> Run it back for today — same shape, fresh spots
+                    </button>
+                  )}
+
                   <WeatherCard weather={plan.weather} />
 
                   <div className="space-y-3">
@@ -1691,6 +1877,7 @@ export default function TheGoodHours() {
                             <span className="text-xs font-extrabold flex items-center gap-1.5 flex-wrap" style={{ color: C.terra }}>
                               {b.time}
                               {b.yourSave && <Pill tone="gold">⭐ Your save</Pill>}
+                              {b.swapped && <Pill tone="sage">backup</Pill>}
                             </span>
                             <Pill tone={b.cost?.toLowerCase() === "free" ? "sage" : "gold"}>{b.cost}</Pill>
                           </div>
@@ -1699,6 +1886,14 @@ export default function TheGoodHours() {
                             <MapPin size={12} /> {b.venue}
                           </p>
                           <p className="text-xs mt-1.5 font-semibold leading-relaxed" style={{ color: C.inkSoft }}>{b.why}</p>
+                          <button
+                            onClick={() => swapBlock(i)}
+                            disabled={swapping !== null}
+                            className="mt-2 text-[11px] font-extrabold flex items-center gap-1"
+                            style={{ color: swapping === i ? C.inkSoft : C.sage }}
+                          >
+                            <RotateCcw size={11} /> {swapping === i ? "Finding a backup…" : "Closed or packed? Swap this stop"}
+                          </button>
                         </div>
                       </div>
                     ))}
@@ -1708,6 +1903,42 @@ export default function TheGoodHours() {
                     <div className="fade-up rounded-3xl p-4 flex gap-3 items-start" style={{ background: C.goldSoft }}>
                       <Sparkles size={17} style={{ color: "#C77800" }} className="mt-0.5 shrink-0" />
                       <p className="text-sm font-bold leading-relaxed" style={{ color: "#9A5B00" }}>{plan.proTip}</p>
+                    </div>
+                  )}
+
+                  {/* Post-day rating: only for a saved plan whose day has passed */}
+                  {isSavedPlan(plan) && plan.planDate && plan.planDate < localDateStr() && (
+                    <div className="fade-up rounded-3xl p-5" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)", border: `2px solid ${C.sageSoft}` }}>
+                      <p className="font-extrabold text-sm" style={{ color: C.ink }}>How was it?</p>
+                      <p className="text-[11px] font-semibold mt-0.5 mb-3" style={{ color: C.inkSoft }}>One tap per stop — it helps us plan better days for you.</p>
+                      <div className="space-y-2">
+                        {plan.blocks?.map((b, i) => {
+                          const r = ratings[`${plan.id}:${i}`];
+                          return (
+                            <div key={i} className="flex items-center justify-between gap-2">
+                              <p className="text-xs font-bold flex-1 min-w-0 truncate" style={{ color: C.ink }}>{b.venue || b.activity}</p>
+                              <div className="flex gap-1.5 shrink-0">
+                                <button
+                                  onClick={() => rateBlock(plan.id, i, b, 1)}
+                                  className="p-2 rounded-xl transition-all active:scale-95"
+                                  style={{ background: r === 1 ? C.sage : C.cream, color: r === 1 ? "#fff" : C.inkSoft }}
+                                  aria-label="Thumbs up"
+                                >
+                                  <ThumbsUp size={14} />
+                                </button>
+                                <button
+                                  onClick={() => rateBlock(plan.id, i, b, -1)}
+                                  className="p-2 rounded-xl transition-all active:scale-95"
+                                  style={{ background: r === -1 ? C.terra : C.cream, color: r === -1 ? "#fff" : C.inkSoft }}
+                                  aria-label="Thumbs down"
+                                >
+                                  <ThumbsDown size={14} />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   )}
 
@@ -1969,22 +2200,31 @@ export default function TheGoodHours() {
                 </div>
               ) : (
                 savedPlans.map((p, i) => (
-                  <button
+                  <div
                     key={p.id}
-                    onClick={() => { setPlan(p); setTab("plan"); }}
-                    className={`fade-up fade-up-${Math.min(i + 1, 4)} w-full text-left rounded-3xl p-5 flex items-center justify-between`}
+                    className={`fade-up fade-up-${Math.min(i + 1, 4)} w-full rounded-3xl p-5`}
                     style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}
                   >
-                    <div>
-                      <div className="flex gap-1.5 mb-1.5">
-                        {p.isPublic ? <Pill tone="sage">public</Pill> : <Pill tone="terra">private</Pill>}
-                        <Pill tone="gold">{p.savedAt}</Pill>
+                    <button onClick={() => { setPlan(p); setTab("plan"); }} className="w-full text-left flex items-center justify-between">
+                      <div>
+                        <div className="flex gap-1.5 mb-1.5">
+                          {p.isPublic ? <Pill tone="sage">public</Pill> : <Pill tone="terra">private</Pill>}
+                          <Pill tone="gold">{p.savedAt}</Pill>
+                        </div>
+                        <h3 className="font-extrabold text-sm" style={{ color: C.ink }}>{p.title}</h3>
+                        <p className="text-xs font-semibold mt-0.5" style={{ color: C.inkSoft }}>{p.location} · {p.blocks?.length} activities</p>
                       </div>
-                      <h3 className="font-extrabold text-sm" style={{ color: C.ink }}>{p.title}</h3>
-                      <p className="text-xs font-semibold mt-0.5" style={{ color: C.inkSoft }}>{p.location} · {p.blocks?.length} activities</p>
-                    </div>
-                    <ChevronRight size={18} style={{ color: C.inkSoft }} />
-                  </button>
+                      <ChevronRight size={18} style={{ color: C.inkSoft }} />
+                    </button>
+                    <button
+                      onClick={() => runItBack(p)}
+                      disabled={loading}
+                      className="mt-3 text-[11px] font-extrabold flex items-center gap-1"
+                      style={{ color: C.sage }}
+                    >
+                      <RotateCcw size={12} /> Run it back for today
+                    </button>
+                  </div>
                 ))
               )}
             </div>
