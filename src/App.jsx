@@ -861,6 +861,19 @@ export default function TheGoodHours() {
     if (cErr) console.error("admin_comp_list failed:", cErr.message); // e.g. migration 9 not run
     setCompList(data ?? []);
   }
+  async function sendInvite(email) {
+    const { data: { session: currentSession }, error } = await supabase.auth.getSession();
+    if (error || !currentSession?.access_token) throw new Error("Admin session is unavailable");
+    const response = await fetch("/api/send-invite", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${currentSession.access_token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ email }),
+    });
+    if (!response.ok) throw new Error(`Invitation failed (${response.status})`);
+  }
   // Grants by email, registered or not — an influencer's email usually arrives
   // before they've signed up, and the grant applies itself when they do.
   async function grantAccess() {
@@ -872,22 +885,48 @@ export default function TheGoodHours() {
       p_email: email,
       p_note: compNote.trim() || null,
     });
-    setAdminBusy(false);
     if (gErr) {
+      setAdminBusy(false);
       setCompResult({ tone: "bad", text: "Couldn't grant access — check the email and try again." });
       return;
     }
+    let invited = false;
+    if (!data?.already_paying) {
+      try {
+        await sendInvite(email);
+        invited = true;
+      } catch (error) {
+        console.error("Invitation could not be sent:", error);
+      }
+    }
+    setAdminBusy(false);
     if (data?.already_paying) {
-      setCompResult({ tone: "ok", text: `${email} is already a paying member — left their subscription alone.` });
+      setCompResult({ tone: "ok", text: `${email} is already a paying member — their subscription was left alone and no invitation was sent.` });
+    } else if (!invited) {
+      setCompResult({ tone: "bad", text: `Access was granted to ${email}, but the invitation email failed. Use Re-invite below.` });
     } else if (data?.registered) {
-      setCompResult({ tone: "ok", text: `${email} has unlimited access now.` });
+      setCompResult({ tone: "ok", text: `${email} has unlimited access now. Invitation sent.` });
     } else {
-      setCompResult({ tone: "ok", text: `Saved. ${email} hasn't signed up yet — access turns on automatically the moment they do.` });
+      setCompResult({ tone: "ok", text: `Invitation sent to ${email}. Access turns on automatically when they sign up.` });
     }
     setCompEmail("");
     setCompNote("");
     loadCompList();
     loadAdminUsers();
+  }
+  async function reInvite(email) {
+    if (adminBusy) return;
+    setAdminBusy(true);
+    setCompResult(null);
+    try {
+      await sendInvite(email);
+      setCompResult({ tone: "ok", text: `Invitation sent again to ${email}.` });
+    } catch (error) {
+      console.error("Invitation could not be resent:", error);
+      setCompResult({ tone: "bad", text: `Could not send an invitation to ${email}. Their access grant is still saved.` });
+    } finally {
+      setAdminBusy(false);
+    }
   }
   async function revokeAccess(email) {
     if (adminBusy) return;
@@ -2509,7 +2548,7 @@ export default function TheGoodHours() {
                   <p className="text-[11px] font-extrabold mt-6 mb-2" style={{ color: C.inkSoft }}>UNLIMITED ACCESS</p>
                   <div className="rounded-3xl p-4" style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}>
                     <p className="text-[11px] font-semibold mb-3" style={{ color: C.inkSoft }}>
-                      Give someone full access, free. Works even if they haven't signed up yet — it turns on by itself when they do.
+                      Give someone full access, free, and email them an invitation. If they haven't signed up yet, access turns on when they do.
                     </p>
                     <input
                       value={compEmail}
@@ -2558,6 +2597,14 @@ export default function TheGoodHours() {
                             </span>
                             <span className="flex items-center gap-1.5 shrink-0">
                               <Pill tone={c.active ? "sage" : "gold"}>{c.active ? "active" : "waiting for signup"}</Pill>
+                              <button
+                                onClick={() => reInvite(c.email)}
+                                disabled={adminBusy}
+                                className="text-[10px] font-extrabold px-2 py-1 rounded-lg"
+                                style={{ background: C.sageSoft, color: C.sage }}
+                              >
+                                Re-invite
+                              </button>
                               <button
                                 onClick={() => revokeAccess(c.email)}
                                 disabled={adminBusy}

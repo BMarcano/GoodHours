@@ -80,24 +80,46 @@ export function paymentEmail() {
   };
 }
 
-export async function sendEmail(to, { subject, preview, html }) {
+export function invitationEmail() {
+  return {
+    subject: "Your free full access to The Good Hours is ready ☀️",
+    preview: "Unlimited day plans are waiting for you.",
+    html: shell(
+      "Unlimited day plans are waiting for you.",
+      `<p ${H}>You're invited to The Good Hours!</p>
+       <p ${P}>We've given you full access, on us. You can make unlimited day plans, save your favorites, and find local events.</p>
+       <p ${P}>Open The Good Hours and use this email address to sign up or sign in. If you're new, your access will turn on automatically when you join.</p>
+       ${button("Start planning &rarr;", SITE)}
+       <p ${P}>No payment is needed. Just us, you, and better hours.</p>
+       <p ${P}>&mdash; The Good Hours Team</p>`
+    ),
+  };
+}
+
+export async function deliverEmail(to, { subject, html }) {
   const key = process.env.RESEND_API_KEY;
-  if (!key) {
-    console.error("RESEND_API_KEY is not set — no email sent to", to);
-    return;
+  if (!key) throw new Error("RESEND_API_KEY is not set");
+  if (!to) throw new Error("Email recipient is missing");
+
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ from: FROM, to: [to], subject, html }),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Resend ${response.status}: ${detail.slice(0, 300)}`);
   }
-  if (!to) {
-    console.error("sendEmail called without a recipient");
-    return;
-  }
+  const result = await response.json().catch(() => ({}));
+  return result?.id || null;
+}
+
+export async function sendEmail(to, { subject, preview, html }) {
   try {
-    const r = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: FROM, to: [to], subject, html }),
-    });
-    if (!r.ok) console.error("Resend error:", r.status, await r.text());
+    await deliverEmail(to, { subject, html });
+    return true;
   } catch (e) {
     console.error("Resend error:", e);
+    return false;
   }
 }
