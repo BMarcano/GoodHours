@@ -1,7 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Sun, MapPin, Clock, Heart, Users, Bookmark, Globe, MessageCircle, Sparkles, ChevronRight, Plus, X, Calendar, ThumbsUp, Baby, ShieldCheck, Star, Camera, Trash2, Pencil, ImagePlus, Check, Link2, ThumbsDown, RotateCcw } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import { initPixel, initGoogleTag, trackPixel, trackGa } from "./pixel";
+import { localDateStr, localDayOffset, upcomingPlanDate, millisecondsUntilNextDay } from "./calendar";
+import { createRequestGeneration, loadPlanEvents } from "./planRequests";
 
 // Snapshot of the URL hash at boot. Auth links (password reset) land with
 // their state here, and the auth library consumes/cleans the hash asynchronously
@@ -117,15 +119,6 @@ function MnnLogo({ size = 52 }) {
   );
 }
 
-// The user's LOCAL calendar date as YYYY-MM-DD. Never use toISOString() for
-// this: it converts to UTC, so anyone west of Greenwich gets tomorrow's date
-// during their evening — which shifted every plan a day forward.
-function localDateStr(d = new Date()) {
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${d.getFullYear()}-${m}-${day}`;
-}
-
 // Noon keeps a bare YYYY-MM-DD from sliding into the neighbouring day when the
 // browser reads it back in local time.
 function weekdayLong(isoDate) {
@@ -138,7 +131,7 @@ function weekdayLong(isoDate) {
 function dayWord(isoDate) {
   if (!isoDate) return "today";
   if (isoDate === localDateStr()) return "today";
-  if (isoDate === localDateStr(new Date(Date.now() + 86400000))) return "tomorrow";
+  if (isoDate === localDayOffset(1)) return "tomorrow";
   return `on ${weekdayLong(isoDate)}`;
 }
 
@@ -585,10 +578,18 @@ export default function TheGoodHours() {
   const [ages, setAges] = useState([""]);
   const [slots, setSlots] = useState([{ from: "9:00 AM", to: "12:00 PM" }]);
   const [location, setLocation] = useState("");
-  const [planDate, setPlanDate] = useState(localDateStr()); // defaults to today, in the user's own timezone
+  const [today, setToday] = useState(localDateStr);
+  const [planDate, setPlanDate] = useState(localDateStr); // defaults to today, in the user's own timezone
+  const requestGeneration = useRef(null);
+  if (!requestGeneration.current) requestGeneration.current = createRequestGeneration();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [plan, setPlan] = useState(null);
+  const displayedPlanId = useRef(null);
+  function showPlan(next) {
+    displayedPlanId.current = next?.id ?? null;
+    setPlan(next);
+  }
   const [savedPlans, setSavedPlans] = useState([]);
   const [featured, setFeatured] = useState(null); // one active sponsor from the sponsors table
   // --- Community (Milestone 3): real public plans, likes, comments ---
@@ -648,6 +649,31 @@ export default function TheGoodHours() {
   const [napSavedFlash, setNapSavedFlash] = useState(false);
   const [ratings, setRatings] = useState({}); // { "planId:blockIndex": 1 | -1 } — post-day thumbs
   const [swapping, setSwapping] = useState(null); // block index being swapped for a backup
+
+  // Mobile tabs often survive overnight. Refresh the calendar on return and
+  // at local midnight, while keeping any future date the user selected.
+  useEffect(() => {
+    let timer;
+    const refreshDay = () => {
+      const now = new Date();
+      setToday(localDateStr(now));
+      setPlanDate((date) => upcomingPlanDate(date, now));
+      clearTimeout(timer);
+      timer = setTimeout(refreshDay, millisecondsUntilNextDay(now));
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") refreshDay();
+    };
+    refreshDay();
+    window.addEventListener("focus", refreshDay);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("focus", refreshDay);
+      document.removeEventListener("visibilitychange", onVisibility);
+      requestGeneration.current.invalidate();
+    };
+  }, []);
 
   // The wrapper can inject its JS bridge after first paint — re-check once
   useEffect(() => {
@@ -737,10 +763,12 @@ export default function TheGoodHours() {
       setSession(newSession);
       if (event === "SIGNED_OUT") {
         // signed out — wipe per-user state; login screen renders while session is null
+        requestGeneration.current.invalidate();
+        setLoading(false);
         setAuthStep("paywall");
         setPreviewMode(false);
         setPreviewUsed(false);
-        setPlan(null);
+        showPlan(null);
         setSavedPlans([]);
         setTab("build");
         setAuthMode("signup");
@@ -1093,20 +1121,29 @@ export default function TheGoodHours() {
 
   const canGenerate = ages.some((a) => a.trim()) && location.trim() && slots.some((s) => s.from && s.to);
   // Yesterday's saved plan with no ratings yet → a one-line nudge on the Build tab
-  const yesterdayIso = localDateStr(new Date(Date.now() - 86400000));
+  const yesterdayIso = localDayOffset(-1);
   const yesterdayPlan = savedPlans.find((p) => p.planDate === yesterdayIso && !Object.keys(ratings).some((k) => k.startsWith(`${p.id}:`)));
 
   async function handleGenerate(overrides) {
     const input = { ages, slots, location, planDate, ...(overrides || {}) };
     // Preview users get exactly one plan — second attempt returns to paywall
     if (previewMode && previewUsed) { setAuthStep("paywall"); return; }
+    // Also check at submit: background timers can be suspended past midnight.
+    input.planDate = upcomingPlanDate(input.planDate);
+    setPlanDate(input.planDate);
+    const isCurrent = requestGeneration.current.begin();
     setLoading(true);
     setError("");
+    setEvents(null);
+    setEventsPlanId(null);
+    setEventsLoading(false);
+    setSwapping(null);
     try {
       const token = session?.access_token;
       const p = await generatePlan({ ...input, napWindow }, token);
+      if (!isCurrent()) return;
       const genId = Date.now();
-      setPlan({ ...p, id: genId, location: input.location, ages: [...input.ages], planDate: input.planDate, slots: input.slots, isPublic: false, savedAt: null });
+      showPlan({ ...p, id: genId, location: input.location, ages: [...input.ages], planDate: input.planDate, slots: input.slots, isPublic: false, savedAt: null });
       setTab("plan");
       if (previewMode) {
         // the server increments profiles.free_plans_used atomically
@@ -1119,25 +1156,23 @@ export default function TheGoodHours() {
       setEvents(null);
       setEventsPlanId(genId);
       setEventsLoading(true);
-      const mergeEvents = (partial) =>
-        setEvents((prev) => ({ local: [], worthTheTrip: [], ...(prev || {}), ...partial }));
-      Promise.allSettled([
-        fetchTodaysEvents({ location: input.location, planDate: input.planDate, ages: input.ages, kind: "local", weather: p.weather }, token)
-          .then(mergeEvents)
-          .catch(() => mergeEvents({ local: [] })),
-        fetchTodaysEvents({ location: input.location, planDate: input.planDate, ages: input.ages, kind: "trip", weather: p.weather }, token)
-          .then(mergeEvents)
-          .catch(() => mergeEvents({ worthTheTrip: [] })),
-      ]).then(() => setEventsLoading(false));
+      void loadPlanEvents({
+        load: (kind) => fetchTodaysEvents({ location: input.location, planDate: input.planDate, ages: input.ages, kind, weather: p.weather }, token),
+        isCurrent,
+        onEvents: (partial) => setEvents((prev) => isCurrent() ? { local: [], worthTheTrip: [], ...(prev || {}), ...partial } : prev),
+        onSettled: () => setEventsLoading((value) => isCurrent() ? false : value),
+      });
     } catch (e) {
+      if (!isCurrent()) return;
       if (e.message === "membership_required") {
         setPreviewUsed(true);
         setAuthStep("paywall");
       } else {
         setError("Couldn't generate a plan — try again in a moment.");
       }
+    } finally {
+      if (isCurrent()) setLoading(false);
     }
-    setLoading(false);
   }
 
   async function handleStartMembership() {
@@ -1162,6 +1197,7 @@ export default function TheGoodHours() {
   async function savePlan(makePublic) {
     if (previewMode) { setAuthStep("paywall"); return; } // saving is a member feature
     if (!plan || !session?.user?.id || saving) return;
+    const isCurrent = requestGeneration.current.current();
     setSaving(true);
     setError("");
     const payload = {
@@ -1196,8 +1232,12 @@ export default function TheGoodHours() {
     }
     const saved = dbPlanToUi(data);
     setSavedPlans((prev) => [saved, ...prev.filter((p) => p.id !== saved.id && p.id !== plan.id)]);
-    if (eventsPlanId === plan.id) setEventsPlanId(saved.id); // keep events attached across the id change
-    setPlan(saved);
+    if (isCurrent() && displayedPlanId.current === plan.id) {
+      // The same plan keeps its pending events across the database ID change.
+      // A late save must never switch the screen back from a newer plan.
+      setEventsPlanId((id) => isCurrent() && id === plan.id ? saved.id : id);
+      showPlan(saved);
+    }
     if (makePublic) {
       const { data: fresh } = await supabase.rpc("community_feed");
       setFeed(fresh ?? []); // the newly public plan now shows in the real feed
@@ -1254,21 +1294,24 @@ export default function TheGoodHours() {
   // the rest of the day untouched. Saved plans persist the swap quietly. ---
   async function swapBlock(i) {
     if (!plan || swapping !== null) return;
+    const isCurrent = requestGeneration.current.current();
     setSwapping(i);
     setError("");
     try {
       const block = await swapPlanBlock({ plan, blockIndex: i, reason: "closed" }, session?.access_token);
+      if (!isCurrent() || displayedPlanId.current !== plan.id) return;
       const blocks = plan.blocks.map((b, j) => (j === i ? { ...block, swapped: true } : b));
       const next = { ...plan, blocks };
-      setPlan(next);
+      showPlan(next);
       if (isSavedPlan(plan)) {
         await supabase.from("plans").update({ blocks }).eq("id", plan.id);
         setSavedPlans((prev) => prev.map((p) => (p.id === plan.id ? next : p)));
       }
     } catch (e) {
-      setError("Couldn't find a backup for that stop — try again in a moment.");
+      if (isCurrent()) setError("Couldn't find a backup for that stop — try again in a moment.");
+    } finally {
+      if (isCurrent()) setSwapping(null);
     }
-    setSwapping(null);
   }
 
   // --- Save Inbox ---
@@ -1676,7 +1719,7 @@ export default function TheGoodHours() {
             <div className="space-y-4">
               {yesterdayPlan && (
                 <button
-                  onClick={() => { setPlan(yesterdayPlan); setTab("plan"); }}
+                  onClick={() => { showPlan(yesterdayPlan); setTab("plan"); }}
                   className="fade-up w-full rounded-2xl px-4 py-3 flex items-center justify-between gap-2"
                   style={{ background: C.sageSoft }}
                 >
@@ -1813,8 +1856,8 @@ export default function TheGoodHours() {
                 </div>
                 <div className="flex gap-2 items-center flex-wrap">
                   {[
-                    { label: "Today", value: localDateStr() },
-                    { label: "Tomorrow", value: localDateStr(new Date(Date.now() + 86400000)) },
+                    { label: "Today", value: today },
+                    { label: "Tomorrow", value: localDayOffset(1) },
                   ].map((d) => (
                     <button
                       key={d.label}
@@ -1832,7 +1875,7 @@ export default function TheGoodHours() {
                   <input
                     type="date"
                     value={planDate}
-                    min={localDateStr()}
+                    min={today}
                     onChange={(e) => e.target.value && setPlanDate(e.target.value)}
                     className="flex-1 min-w-[130px] rounded-xl px-3 py-2 text-xs font-extrabold outline-none border-2"
                     style={{ borderColor: "#F3EBDA", color: C.ink, background: C.cream }}
@@ -2244,7 +2287,7 @@ export default function TheGoodHours() {
                     className={`fade-up fade-up-${Math.min(i + 1, 4)} w-full rounded-3xl p-5`}
                     style={{ background: C.card, boxShadow: "0 2px 12px rgba(46,41,78,.07)" }}
                   >
-                    <button onClick={() => { setPlan(p); setTab("plan"); }} className="w-full text-left flex items-center justify-between">
+                    <button onClick={() => { showPlan(p); setTab("plan"); }} className="w-full text-left flex items-center justify-between">
                       <div>
                         <div className="flex gap-1.5 mb-1.5">
                           {p.isPublic ? <Pill tone="sage">public</Pill> : <Pill tone="terra">private</Pill>}
@@ -2673,7 +2716,7 @@ export default function TheGoodHours() {
         <nav className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md px-5 pb-5">
           <div className="flex gap-1 p-1.5 rounded-3xl" style={{ background: C.card, boxShadow: "0 -2px 24px rgba(46,41,78,.14)" }}>
             <TabButton active={tab === "build"} onClick={() => setTab("build")} icon={Sparkles} label="Build" />
-            <TabButton active={tab === "plan"} onClick={() => setTab("plan")} icon={Sun} label="Today" />
+            <TabButton active={tab === "plan"} onClick={() => setTab("plan")} icon={Sun} label="My plan" />
             <TabButton active={tab === "saved"} onClick={() => (previewMode ? setAuthStep("paywall") : setTab("saved"))} icon={Bookmark} label="Saved" />
             <TabButton active={tab === "community"} onClick={() => (previewMode ? setAuthStep("paywall") : setTab("community"))} icon={Users} label="Community" />
           </div>
